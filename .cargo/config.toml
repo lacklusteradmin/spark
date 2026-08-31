@@ -1,0 +1,15 @@
+# Reproducible builds from commit 1 (D4).
+#
+# Sources of nondeterminism removed here:
+#   incremental = false    incremental artifacts are not deterministic
+#
+# Sources removed elsewhere, because they need values this file cannot express:
+#   --remap-path-prefix    absolute build + registry paths get embedded in panic
+#                          messages and debuginfo. They differ per machine, so the
+#                          remap is applied via RUSTFLAGS in scripts/build-repro.sh
+#                          and in CI, never hardcoded here.
+#   SOURCE_DATE_EPOCH      must be set and identical between compared builds.
+#   codegen-units = 1      set per-profile in the workspace Cargo.toml.
+
+[build]
+incremental = false

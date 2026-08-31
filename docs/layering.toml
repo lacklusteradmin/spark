@@ -1,0 +1,142 @@
+# The crate graph, declared once so it can be enforced instead of remembered.
+# crates/spark-invariants/tests/layering.rs checks every rule below against the
+# real Cargo.toml files. Editing this file is how you change the architecture;
+# editing a Cargo.toml without editing this file is a test failure.
+#
+# zone
+#   pure      below the I/O line. No network, no filesystem, no clock.
+#             Everything here runs in gate 2-4 with no server in existence.
+#   io        above the I/O line, below the FFI line. May do I/O.
+#   boundary  the FFI line and above. Must contain no cryptography.
+#
+# layer
+#   A crate may depend only on workspace crates with a strictly lower layer.
+#   This is what makes the graph a DAG without needing a cycle check.
+
+[[crate]]
+name  = "spark-crypto"
+layer = 0
+zone  = "pure"
+deps  = []
+role  = "HKDF, XChaCha20-Poly1305, SHA-256, Ed25519, BIP-39, blind-signature client. Pure functions."
+
+[[crate]]
+name  = "spark-identity"
+layer = 1
+zone  = "pure"
+deps  = ["spark-crypto"]
+role  = "seed -> keypair, derivation path, local key storage, key migration"
+
+[[crate]]
+name  = "spark-chunk"
+layer = 1
+zone  = "pure"
+deps  = ["spark-crypto"]
+role  = "chunk format, envelope encryption, naming (convergent / room-derived)"
+
+[[crate]]
+name  = "spark-mls"
+layer = 2
+zone  = "pure"
+deps  = ["spark-crypto", "spark-identity"]
+role  = "OpenMLS wrapper: group state, commits, flat owner set, history re-share"
+
+[[crate]]
+name  = "spark-keyring"
+layer = 2
+zone  = "pure"
+deps  = ["spark-crypto", "spark-identity", "spark-chunk"]
+role  = "room keys, chunk list, receipts, upload list, snapshot + delta encoding"
+
+[[crate]]
+name  = "spark-sync"
+layer = 3
+zone  = "pure"
+deps  = ["spark-chunk", "spark-keyring", "spark-mls"]
+role  = "lane merge, vector clocks, total order, conflict resolution, offline queue"
+
+# ---- I/O line ----
+# Everything above this point is `pure`. spark-transport is the only crate below
+# spark-client that is allowed to touch the network.
+
+[[crate]]
+name  = "spark-transport"
+layer = 4
+zone  = "io"
+deps  = ["spark-chunk"]
+role  = "WebSocket/TLS, SOCKS5 per traffic class, Hysteria scheduler. The only I/O below the client."
+
+[[crate]]
+name  = "spark-tokens"
+layer = 3
+zone  = "pure"
+deps  = ["spark-crypto", "spark-keyring"]
+role  = "blind-token withdrawal/spend protocol, refund vouchers, quota ledger. Takes a transport from the caller rather than owning one, so the security-critical half is testable offline."
+
+[[crate]]
+name  = "spark-client"
+layer = 5
+zone  = "io"
+deps  = ["spark-crypto", "spark-identity", "spark-chunk", "spark-mls", "spark-keyring", "spark-sync", "spark-transport", "spark-tokens"]
+role  = "facade, state machine, event stream. The whole API surface."
+
+# ---- FFI line ----
+
+[[crate]]
+name  = "spark-ffi"
+layer = 6
+zone  = "boundary"
+deps  = ["spark-client"]
+role  = "UniFFI bindings. No logic."
+
+[[crate]]
+name  = "spark-cli"
+layer = 6
+zone  = "boundary"
+deps  = ["spark-client"]
+role  = "scripted verification harness. Not a user-facing product."
+
+# ---- servers: separate graph, never depended on by client crates ----
+
+[[crate]]
+name  = "spark-keyring-server"
+layer = 10
+zone  = "io"
+deps  = ["spark-chunk"]
+role  = "trust domain 1: addr blobs, quota counters, token withdrawal"
+
+[[crate]]
+name  = "spark-content-server"
+layer = 10
+zone  = "io"
+deps  = ["spark-chunk"]
+role  = "trust domain 2: account-free chunk store, write-once, receipts"
+
+[[crate]]
+name  = "spark-issuer"
+layer = 10
+zone  = "io"
+deps  = []
+role  = "trust domain 3: name mapping, blind signing, payment nodes"
+
+# Crates in `pure` must not reach these, directly or transitively.
+[io_crates]
+banned_in_pure = [
+  "tokio", "async-std", "smol", "mio", "reqwest", "hyper", "ureq", "curl",
+  "tungstenite", "tokio-tungstenite", "socket2", "rustls", "native-tls",
+  "openssl", "tokio-socks", "axum", "actix-web", "warp", "rusqlite", "sled",
+]
+
+# Source-level bans inside `pure` crates. Cargo.toml alone cannot catch these:
+# std is always available.
+[pure_source]
+banned_paths = ["std::net", "std::fs", "std::time::SystemTime", "std::time::Instant", "std::process"]
+
+# Crates in `boundary` must not touch cryptography. If a key is handled above the
+# FFI line, reproducible builds stop bounding what an auditor has to read.
+[boundary]
+banned_crates = [
+  "spark-crypto", "spark-identity", "spark-chunk", "spark-mls", "spark-keyring",
+  "openmls", "ed25519-dalek", "x25519-dalek", "chacha20poly1305", "aes-gcm",
+  "hkdf", "sha2", "bip39", "rsa",
+]

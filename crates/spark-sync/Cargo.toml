@@ -1,0 +1,11 @@
+[package]
+name = "spark-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+spark-chunk.workspace = true
+spark-keyring.workspace = true
+spark-mls.workspace = true

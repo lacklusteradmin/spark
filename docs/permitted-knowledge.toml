@@ -1,0 +1,74 @@
+# What each server is allowed to persist. Deny by default.
+#
+# This is the machine-readable form of Spark-build-notes.md §2. Each server crate
+# ships a `schema.toml` declaring every field it writes to durable storage; the
+# test in crates/spark-invariants/tests/permitted_knowledge.rs asserts that
+# declaration is a subset of this file. A field that is not listed here cannot be
+# persisted, whatever it is called.
+#
+# Two nets, because a whitelist alone fails the day someone renames a field to
+# something already on it:
+#   1. subset check   — every declared field appears below
+#   2. concept ban    — no declared field, whitelisted or not, matches a banned
+#                       substring. Catches `owner_addr` slipping in as `addr`.
+
+[keyring_service]
+# Trust domain 1. The only service that knows an account-shaped identifier exists.
+fields = [
+  "addr",              # SHA-256 derived keyring address. NOT a public key.
+  "snapshot_bytes",    # opaque kind-3 chunk
+  "snapshot_len",
+  "delta_bytes",
+  "delta_index",
+  "mtime",
+  "quota_media_used",
+  "quota_text_used",
+  "quota_limit",
+  "rate_window_start",
+  "rate_count",
+  "spent_refund_voucher",
+]
+
+[content_service]
+# Trust domain 2. No accounts. Reads carry nothing at all.
+fields = [
+  "chunk_name",
+  "chunk_bytes",
+  "chunk_len",
+  "chunk_kind",
+  "receipt_count",     # how many unknown parties hold it. Not who.
+  "receipt_hash",
+  "spent_token_serial",
+]
+
+[issuer_service]
+# Trust domain 3. Blind. The mapping is overwritten on transfer, never appended.
+fields = [
+  "name",
+  "name_pubkey",
+  "paid_until_day",
+  "blind_sig_count",
+  "spent_voucher_serial",
+]
+
+# Concepts that must never be stored, in any service, phrased as the words a
+# schema would actually use (build-notes §2).
+#
+# Matching is on `_`-separated tokens, not raw substrings. A field is banned when
+# a banned entry's tokens appear as a contiguous run in the field's tokens:
+#   "ip"        bans  client_ip, ip_addr      but not  receipt_count
+#   "real_name" bans  real_name, user_real_name  but not  chunk_name
+# Raw substring matching would need an allow list, and every entry on an allow
+# list is a hole in this net. Token matching needs none.
+[banned]
+substrings = [
+  "sender", "recipient", "from_addr", "to_addr", "peer",
+  "room", "member", "membership", "group_id", "participant",
+  "uploader", "uploaded_by", "owner_addr", "author",
+  "contact", "friend", "roster", "graph", "edge",
+  "ip", "user_agent", "device_id", "push_token", "apns", "fcm",
+  "phone", "email", "real_name",
+  "payment_addr", "tx_hash", "invoice_key", "payer",
+  "transfer_history", "previous_pubkey", "old_key",
+  "plaintext", "message_body", "content_text",
+]

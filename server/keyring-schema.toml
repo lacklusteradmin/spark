@@ -1,0 +1,17 @@
+# Declared by spark-keyring-server. Checked against docs/permitted-knowledge.toml.
+service = "keyring_service"
+[[table]]
+name = "keyring"
+fields = ["addr", "snapshot_bytes", "snapshot_len", "mtime"]
+[[table]]
+name = "keyring_delta"
+fields = ["addr", "delta_index", "delta_bytes", "mtime"]
+[[table]]
+name = "quota"
+fields = ["addr", "quota_media_used", "quota_text_used", "quota_limit"]
+[[table]]
+name = "rate"
+fields = ["addr", "rate_window_start", "rate_count"]
+[[table]]
+name = "refund_spent"
+fields = ["spent_refund_voucher"]

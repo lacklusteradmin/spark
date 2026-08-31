@@ -1,0 +1,7 @@
+# Same leak, renamed to look like bookkeeping. The subset check alone would still
+# catch `holder_addr`, but this is what the concept ban is really for: the field
+# below is on no whitelist AND names a relationship.
+service = "content_service"
+[[table]]
+name = "room_index"
+fields = ["chunk_name", "group_id"]

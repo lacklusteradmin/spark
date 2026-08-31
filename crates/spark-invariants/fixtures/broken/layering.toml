@@ -1,0 +1,39 @@
+# Three architectural regressions, each of which would look reasonable in a PR.
+[[crate]]
+name = "spark-crypto"
+layer = 0
+zone = "pure"
+deps = []
+
+[[crate]]
+name = "spark-chunk"
+layer = 1
+zone = "pure"
+deps = ["spark-crypto"]
+
+[[crate]]
+name = "spark-transport"
+layer = 4
+zone = "io"
+deps = []
+
+[[crate]]
+name = "spark-client"
+layer = 5
+zone = "io"
+deps = ["spark-chunk", "spark-transport"]
+
+[[crate]]
+name = "spark-ffi"
+layer = 6
+zone = "boundary"
+deps = ["spark-client"]
+
+[io_crates]
+banned_in_pure = ["tokio", "reqwest"]
+
+[pure_source]
+banned_paths = ["std::net", "std::fs"]
+
+[boundary]
+banned_crates = ["spark-crypto", "spark-chunk", "ed25519-dalek"]

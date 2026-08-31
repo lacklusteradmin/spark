@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/spark-crypto",
+  "crates/spark-identity",
+  "crates/spark-chunk",
+  "crates/spark-mls",
+  "crates/spark-keyring",
+  "crates/spark-sync",
+  "crates/spark-transport",
+  "crates/spark-tokens",
+  "crates/spark-client",
+  "crates/spark-ffi",
+  "crates/spark-cli",
+  "crates/spark-invariants",
+  "server/spark-keyring-server",
+  "server/spark-content-server",
+  "server/spark-issuer",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/spark-messenger/spark"
+
+[workspace.dependencies]
+spark-crypto    = { path = "crates/spark-crypto" }
+spark-identity  = { path = "crates/spark-identity" }
+spark-chunk     = { path = "crates/spark-chunk" }
+spark-mls       = { path = "crates/spark-mls" }
+spark-keyring   = { path = "crates/spark-keyring" }
+spark-sync      = { path = "crates/spark-sync" }
+spark-transport = { path = "crates/spark-transport" }
+spark-tokens    = { path = "crates/spark-tokens" }
+spark-client    = { path = "crates/spark-client" }
+
+# Reproducible release builds (D4): one codegen unit, no parallel partitioning.
+[profile.release]
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.dev]
+codegen-units = 1

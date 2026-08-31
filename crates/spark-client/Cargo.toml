@@ -1,0 +1,16 @@
+[package]
+name = "spark-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+spark-crypto.workspace = true
+spark-identity.workspace = true
+spark-chunk.workspace = true
+spark-mls.workspace = true
+spark-keyring.workspace = true
+spark-sync.workspace = true
+spark-transport.workspace = true
+spark-tokens.workspace = true

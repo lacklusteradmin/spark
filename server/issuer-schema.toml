@@ -1,0 +1,13 @@
+# Declared by spark-issuer. `name_mapping` is overwritten on transfer; there is
+# deliberately no history table (build-notes §4: a transfer history links an old
+# key to a new one).
+service = "issuer_service"
+[[table]]
+name = "name_mapping"
+fields = ["name", "name_pubkey", "paid_until_day"]
+[[table]]
+name = "issuance"
+fields = ["blind_sig_count"]
+[[table]]
+name = "voucher_spent"
+fields = ["spent_voucher_serial"]

@@ -1,0 +1,9 @@
+# The issuer keeps an audit log of name transfers, which is exactly the thing that
+# links an old key to a new one (build-notes §4).
+service = "issuer_service"
+[[table]]
+name = "name_mapping"
+fields = ["name", "name_pubkey", "paid_until_day"]
+[[table]]
+name = "transfer_history"
+fields = ["name", "previous_pubkey", "name_pubkey"]

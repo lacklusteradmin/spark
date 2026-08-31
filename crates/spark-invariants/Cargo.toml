@@ -1,0 +1,12 @@
+[package]
+name = "spark-invariants"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# No dependencies, deliberately. The harness that polices the dependency graph
+# must not be part of it: a compromised or merely careless dependency should not
+# be able to influence whether the invariant tests pass.
+[dependencies]

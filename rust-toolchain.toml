@@ -1,0 +1,8 @@
+# Pinned for reproducible builds (D4). Bumping this is a deliberate, reviewed
+# change: a new compiler can change codegen and break byte-identical rebuilds.
+#
+# Components are deliberately not listed here. Naming them makes rustup fetch the
+# channel manifest on every invocation, which turns an offline `cargo test` into a
+# network call. CI installs rustfmt and clippy explicitly instead.
+[toolchain]
+channel = "1.94.1"
