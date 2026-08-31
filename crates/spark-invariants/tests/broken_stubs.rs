@@ -72,7 +72,8 @@ fn rejects_layering_regressions() {
     .map(|(k, v)| (k.to_string(), v.into_iter().map(str::to_string).collect()))
     .collect();
 
-    let v = check_layering(&decls, &actual, &rules);
+    // Same map for both: these fixtures declare everything as shipping.
+    let v = check_layering(&decls, &actual, &actual, &rules);
     assert!(!v.is_empty(), "harness accepted three layering regressions");
     assert_mentions(&v, "depends on tokio"); // I/O below the I/O line
     assert_mentions(&v, "spark-client"); // undeclared upward dependency

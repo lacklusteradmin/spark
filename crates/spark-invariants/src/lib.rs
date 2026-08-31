@@ -100,9 +100,19 @@ pub fn zone_rules(doc: &Doc) -> ZoneRules {
 /// `actual` maps crate name to every dependency named in its `[dependencies]`
 /// section, workspace-internal and external alike. Returns one string per
 /// violation; empty means the architecture and the code agree.
+/// `shipping` holds only `[dependencies]`; `actual` holds every section.
+///
+/// The two are used for different rules, deliberately. The workspace-graph checks
+/// use `actual`, because a dev-only edge between two crates is still an edge and
+/// still how a cycle gets introduced. The zone bans use `shipping`, because they
+/// are about what reaches a user: a crate generic over a crypto provider can only
+/// be tested by supplying one, and forbidding that would mean the provider-
+/// generic design could never be exercised. Which pure crates take that exception
+/// is asserted by name in `tests/layering.rs`, so adding one is a deliberate edit.
 pub fn check_layering(
     decls: &[CrateDecl],
     actual: &BTreeMap<String, Vec<String>>,
+    shipping: &BTreeMap<String, Vec<String>>,
     rules: &ZoneRules,
 ) -> Vec<String> {
     let mut v = Vec::new();
@@ -151,7 +161,7 @@ pub fn check_layering(
         // Zone rules.
         match d.zone.as_str() {
             "pure" => {
-                for dep in real {
+                for dep in shipping.get(&d.name).into_iter().flatten() {
                     if rules.banned_in_pure.iter().any(|b| b == dep) {
                         v.push(format!(
                             "{} is `pure` but depends on {dep}: that puts I/O below the I/O line",
@@ -172,7 +182,7 @@ pub fn check_layering(
                 }
             }
             "boundary" => {
-                for dep in real {
+                for dep in shipping.get(&d.name).into_iter().flatten() {
                     if rules.boundary_banned.iter().any(|b| b == dep) {
                         v.push(format!(
                             "{} is `boundary` but depends on {dep}: cryptography above the FFI line",
@@ -334,24 +344,48 @@ pub fn check_permitted(schema: &ServiceSchema, wl: &Whitelist) -> Vec<String> {
 
 /// Every dependency named in a `Cargo.toml`'s `[dependencies]` section.
 pub fn cargo_deps(manifest: &str) -> Vec<String> {
+    cargo_deps_by_section(manifest)
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect()
+}
+
+/// Only the dependencies that ship: `[dependencies]`, not dev or build.
+pub fn cargo_shipping_deps(manifest: &str) -> Vec<String> {
+    cargo_deps_by_section(manifest)
+        .into_iter()
+        .filter(|(_, sec)| sec == "dependencies")
+        .map(|(d, _)| d)
+        .collect()
+}
+
+/// As [`cargo_deps`], but keeping the section each dependency came from, so a
+/// rule can distinguish "reaches a user" from "is used by the test suite".
+pub fn cargo_deps_by_section(manifest: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let mut in_deps = false;
+    let mut section = String::new();
     for line in manifest.lines() {
         let l = line.trim();
         if l.starts_with('[') {
-            in_deps =
-                l == "[dependencies]" || l == "[dev-dependencies]" || l == "[build-dependencies]";
+            section = match l {
+                "[dependencies]" | "[dev-dependencies]" | "[build-dependencies]" => {
+                    l.trim_matches(['[', ']']).to_string()
+                }
+                _ => String::new(),
+            };
             continue;
         }
-        if !in_deps || l.is_empty() || l.starts_with('#') {
+        if section.is_empty() || l.is_empty() || l.starts_with('#') {
             continue;
         }
         if let Some((k, _)) = l.split_once('=') {
             // `foo.workspace = true` names the crate `foo`.
-            out.push(k.trim().split('.').next().unwrap_or("").trim().to_string());
+            let name = k.trim().split('.').next().unwrap_or("").trim().to_string();
+            if !name.is_empty() {
+                out.push((name, section.clone()));
+            }
         }
     }
-    out.retain(|s| !s.is_empty());
     out
 }
 

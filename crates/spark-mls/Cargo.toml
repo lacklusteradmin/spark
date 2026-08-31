@@ -5,6 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# `openmls` with default features off, and no crypto provider. The provider owns
+# entropy and storage, and it arrives as a parameter — which is what keeps this
+# crate `pure`. Depending on openmls_rust_crypto here would drag getrandom, rayon
+# and ~150 other crates below the I/O line; that belongs in spark-client.
 [dependencies]
 spark-crypto.workspace = true
 spark-identity.workspace = true
+openmls = { version = "0.9", default-features = false }
+openmls_traits = "0.6"
+openmls_basic_credential = "0.6"
+
+# Test-only: gate 4 runs two clients in one process, and a real provider has to
+# come from somewhere. In production spark-client supplies it — which is exactly
+# why the crypto backend and its entropy are NOT a normal dependency here.
+[dev-dependencies]
+openmls_rust_crypto = "0.6"

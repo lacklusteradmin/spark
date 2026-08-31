@@ -47,3 +47,36 @@ impl<const N: usize> PartialEq for Secret<N> {
     }
 }
 impl<const N: usize> Eq for Secret<N> {}
+
+/// Serialization of secret material, for encoding the keyring *before* it is
+/// sealed (`docs/protocol.md` §8).
+///
+/// Gated behind the `serde` feature so that turning it on is a visible decision
+/// in a `Cargo.toml` diff. A `Secret` that reaches a serializer which is not
+/// writing into a buffer about to be encrypted is a bug.
+#[cfg(feature = "serde")]
+impl<const N: usize> serde::Serialize for Secret<N> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(&self.0)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, const N: usize> serde::Deserialize<'de> for Secret<N> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<const N: usize>;
+        impl<const N: usize> serde::de::Visitor<'_> for V<N> {
+            type Value = Secret<N>;
+            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                write!(f, "{N} bytes of key material")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Secret<N>, E> {
+                let a: [u8; N] = v
+                    .try_into()
+                    .map_err(|_| E::invalid_length(v.len(), &self))?;
+                Ok(Secret::new(a))
+            }
+        }
+        d.deserialize_bytes(V::<N>)
+    }
+}

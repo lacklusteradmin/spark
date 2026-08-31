@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-spark-crypto.workspace = true
+spark-crypto = { workspace = true, features = ["serde"] }
 spark-identity.workspace = true
 spark-chunk.workspace = true
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+zeroize = { version = "1", default-features = false }

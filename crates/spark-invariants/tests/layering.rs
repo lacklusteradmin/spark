@@ -9,15 +9,26 @@ type Deps = BTreeMap<String, Vec<String>>;
 /// Crate name -> `(path, contents)` for every source file.
 type Sources = BTreeMap<String, Vec<(String, String)>>;
 
-/// Read every workspace crate's real dependencies and source files.
-fn workspace() -> (Deps, Sources) {
+/// What every workspace crate declares and contains.
+struct Workspace {
+    /// Every dependency section.
+    all: Deps,
+    /// `[dependencies]` only — what actually ships.
+    shipping: Deps,
+    /// Source files, for the pure-zone scan.
+    sources: Sources,
+}
+
+fn workspace() -> Workspace {
     let root = repo_root();
-    let mut deps: Deps = BTreeMap::new();
-    let mut srcs: Sources = BTreeMap::new();
+    let mut w = Workspace {
+        all: Deps::new(),
+        shipping: Deps::new(),
+        sources: Sources::new(),
+    };
 
     for parent in ["crates", "server"] {
-        let dir = root.join(parent);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = std::fs::read_dir(root.join(parent)) else {
             continue;
         };
         for e in entries.flatten() {
@@ -27,17 +38,15 @@ fn workspace() -> (Deps, Sources) {
                 continue;
             }
             let name = p.file_name().unwrap().to_string_lossy().to_string();
-            deps.insert(
-                name.clone(),
-                cargo_deps(&std::fs::read_to_string(&manifest).unwrap()),
-            );
+            let src = std::fs::read_to_string(&manifest).unwrap();
+            w.all.insert(name.clone(), cargo_deps(&src));
+            w.shipping.insert(name.clone(), cargo_shipping_deps(&src));
 
-            let src = p.join("src");
-            if let Ok(files) = std::fs::read_dir(&src) {
+            if let Ok(files) = std::fs::read_dir(p.join("src")) {
                 for f in files.flatten() {
                     let fp = f.path();
                     if fp.extension().is_some_and(|x| x == "rs") {
-                        srcs.entry(name.clone()).or_default().push((
+                        w.sources.entry(name.clone()).or_default().push((
                             format!("src/{}", fp.file_name().unwrap().to_string_lossy()),
                             std::fs::read_to_string(&fp).unwrap(),
                         ));
@@ -46,32 +55,67 @@ fn workspace() -> (Deps, Sources) {
             }
         }
     }
-    (deps, srcs)
+    w
 }
 
 #[test]
 fn declared_graph_matches_reality() {
     let doc = load("docs/layering.toml");
-    let decls = crate_decls(&doc);
-    let rules = zone_rules(&doc);
-    let (deps, _) = workspace();
-
-    let v = check_layering(&decls, &deps, &rules);
+    let w = workspace();
+    let v = check_layering(&crate_decls(&doc), &w.all, &w.shipping, &zone_rules(&doc));
     assert!(v.is_empty(), "layering violations:\n  {}", v.join("\n  "));
 }
 
 #[test]
 fn pure_crates_name_no_io() {
     let doc = load("docs/layering.toml");
-    let decls = crate_decls(&doc);
-    let rules = zone_rules(&doc);
-    let (_, srcs) = workspace();
-
-    let v = check_pure_sources(&decls, &srcs, &rules);
+    let w = workspace();
+    let v = check_pure_sources(&crate_decls(&doc), &w.sources, &zone_rules(&doc));
     assert!(
         v.is_empty(),
         "I/O below the I/O line:\n  {}",
         v.join("\n  ")
+    );
+}
+
+#[test]
+fn dev_only_exceptions_to_the_zone_bans_are_named() {
+    // The zone bans check shipping dependencies, because a crate generic over a
+    // crypto provider can only be tested by supplying one. That exception is real
+    // but narrow, so every instance of it is listed here by name: adding one is a
+    // deliberate edit to this file, not a silent widening of the rule.
+    const ALLOWED: &[(&str, &str)] = &[(
+        "spark-mls",
+        // Gate 4 runs two clients in one process. A provider has to come from
+        // somewhere, and in production it comes from spark-client.
+        "openmls_rust_crypto",
+    )];
+
+    let doc = load("docs/layering.toml");
+    let rules = zone_rules(&doc);
+    let w = workspace();
+    let mut found = Vec::new();
+
+    for d in crate_decls(&doc).iter().filter(|d| d.zone == "pure") {
+        let all = w.all.get(&d.name).cloned().unwrap_or_default();
+        let shipping = w.shipping.get(&d.name).cloned().unwrap_or_default();
+        for dep in all.iter().filter(|x| !shipping.contains(x)) {
+            if rules.banned_in_pure.iter().any(|b| b == dep) {
+                found.push((d.name.clone(), dep.clone()));
+            }
+        }
+    }
+
+    let expected: Vec<(String, String)> = ALLOWED
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found, expected,
+        "the set of dev-only exceptions changed. Each one is a crate that may not \
+         ship an entropy source but does use one in tests; if this is intended, add \
+         it to ALLOWED with the reason."
     );
 }
 
@@ -99,11 +143,7 @@ fn every_workspace_member_is_declared() {
         let Some((_, name)) = l.split_once('/') else {
             continue;
         };
-        if !name.starts_with("spark-") {
-            continue;
-        }
-        // The harness polices the graph; it is not part of it.
-        if name == "spark-invariants" {
+        if !name.starts_with("spark-") || name == "spark-invariants" {
             continue;
         }
         if !declared.iter().any(|d| d == name) {

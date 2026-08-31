@@ -32,21 +32,21 @@ name  = "spark-chunk"
 layer = 1
 zone  = "pure"
 deps  = ["spark-crypto"]
-role  = "chunk format, envelope encryption, naming (convergent / room-derived)"
+role  = "chunk format, AEAD sealing, lanes, and the two naming schemes: SHA-256(chunk) for media so the store can verify it, HMAC under the room root for history so an outsider cannot guess it"
 
 [[crate]]
 name  = "spark-mls"
 layer = 2
 zone  = "pure"
 deps  = ["spark-crypto", "spark-identity"]
-role  = "OpenMLS wrapper: group state, commits, flat owner set, history re-share"
+role  = "the policy on top of MLS: flat owner set in a group context extension, and who may add, remove, appoint, dismiss, leave, dissolve. No cryptography. The provider — entropy, crypto backend, storage — arrives as a parameter"
 
 [[crate]]
 name  = "spark-keyring"
 layer = 2
 zone  = "pure"
 deps  = ["spark-crypto", "spark-identity", "spark-chunk"]
-role  = "room keys, chunk list, receipts, upload list, snapshot + delta encoding"
+role  = "the outer envelope layer: room roots, receipts, upload list, tokens, names. Snapshot plus append-only deltas, sealed under the seed-derived keyring key"
 
 [[crate]]
 name  = "spark-sync"
@@ -125,6 +125,12 @@ banned_in_pure = [
   "tokio", "async-std", "smol", "mio", "reqwest", "hyper", "ureq", "curl",
   "tungstenite", "tokio-tungstenite", "socket2", "rustls", "native-tls",
   "openssl", "tokio-socks", "axum", "actix-web", "warp", "rusqlite", "sled",
+  # Entropy is a parameter everywhere below the I/O line: Mnemonic::from_entropy
+  # takes it, Chunk::seal takes a nonce, and spark-mls takes an OpenMlsProvider.
+  # A syscall entropy source arriving transitively would quietly undo all three,
+  # so `openmls_rust_crypto` stays a dev-dependency of spark-mls and a real one
+  # only in spark-client.
+  "getrandom", "rand", "rand_core", "openmls_rust_crypto", "openmls_memory_storage",
 ]
 
 # Source-level bans inside `pure` crates. Cargo.toml alone cannot catch these:

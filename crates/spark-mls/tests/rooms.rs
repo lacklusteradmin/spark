@@ -1,0 +1,314 @@
+//! Gate 4: "Every member sees identical history; a removed member cannot read
+//! later messages; the last owner cannot leave without dissolving; a 1:1 uses the
+//! same owner logic."
+//!
+//! Two clients in one process, no network — each with its own provider, so
+//! neither can see the other's key material.
+
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::OpenMlsProvider;
+use spark_crypto::{Mnemonic, Secret, VerifyingKey};
+use spark_identity::Identity;
+use spark_mls::*;
+
+/// One participant: an identity, its MLS signer, and its own provider.
+struct Client {
+    id: Identity,
+    signer: Signer,
+    provider: OpenMlsRustCrypto,
+}
+
+impl Client {
+    fn new(entropy: u8) -> Self {
+        let id = Identity::from_mnemonic(&Mnemonic::from_entropy(&[entropy; 32]));
+        // The MLS signature key is the identity key. In production this secret
+        // comes from the same derivation; here it is reconstructed the same way.
+        let secret = derive_sign_secret(entropy);
+        let signer = signer_for(&id, &secret);
+        let provider = OpenMlsRustCrypto::default();
+        signer.store(provider.storage()).expect("store signer");
+        Self {
+            id,
+            signer,
+            provider,
+        }
+    }
+    fn key(&self) -> VerifyingKey {
+        self.id.public().sign
+    }
+}
+
+/// Re-derive the Ed25519 secret the same way `spark-identity` does.
+fn derive_sign_secret(entropy: u8) -> Secret<32> {
+    let seed = Mnemonic::from_entropy(&[entropy; 32]).to_seed();
+    let root = spark_crypto::extract(spark_identity::ROOT_SALT, seed.expose());
+    spark_crypto::expand::<32>(&root, spark_identity::INFO_SIGN)
+}
+
+fn root(b: u8) -> RoomRoot {
+    Secret::new([b; 32])
+}
+
+/// Create a room and add `guest`, returning both sides.
+fn room_of_two(host: &Client, guest: &Client) -> (Room, Room) {
+    let mut a = Room::create(&host.provider, &host.key(), &host.signer, root(1)).unwrap();
+    let kp = key_package(&guest.provider, &guest.key(), &guest.signer).unwrap();
+    let c = a
+        .add_member(&host.provider, &host.signer, kp.key_package())
+        .unwrap();
+    // The room root travels out of band: MLS forward secrecy means a joiner
+    // cannot decrypt pre-join history on its own (F4).
+    let b = Room::join(&guest.provider, &c.welcome.unwrap(), root(1)).unwrap();
+    (a, b)
+}
+
+#[test]
+fn every_member_sees_identical_history() {
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (mut a, mut b) = room_of_two(&alice, &bob);
+
+    let mut heard_by_bob = Vec::new();
+    for text in ["one", "two", "three"] {
+        let m = a
+            .send(&alice.provider, &alice.signer, text.as_bytes())
+            .unwrap();
+        match b.process(&bob.provider, &m).unwrap() {
+            Event::Message(got) => heard_by_bob.push(String::from_utf8(got).unwrap()),
+            e => panic!("expected a message, got {e:?}"),
+        }
+    }
+    assert_eq!(heard_by_bob, ["one", "two", "three"]);
+
+    // Both sides agree on membership, owners, and epoch — the state every client
+    // derives history ordering from.
+    let mut ma = a.members();
+    let mut mb = b.members();
+    ma.sort_by_key(|k| *k.as_bytes());
+    mb.sort_by_key(|k| *k.as_bytes());
+    assert_eq!(ma.len(), 2);
+    assert_eq!(ma, mb, "members diverged");
+    assert_eq!(
+        a.owners().unwrap(),
+        b.owners().unwrap(),
+        "owner sets diverged"
+    );
+    assert_eq!(a.epoch(), b.epoch(), "epochs diverged");
+}
+
+#[test]
+fn a_removed_member_cannot_read_later_messages() {
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (mut a, mut b) = room_of_two(&alice, &bob);
+
+    // Bob can read before the removal.
+    let before = a.send(&alice.provider, &alice.signer, b"before").unwrap();
+    assert!(
+        matches!(b.process(&bob.provider, &before).unwrap(), Event::Message(m) if m == b"before")
+    );
+
+    let c = a
+        .remove_member(&alice.provider, &alice.signer, &bob.key())
+        .unwrap();
+    assert!(matches!(
+        b.process(&bob.provider, &c.commit).unwrap(),
+        Event::Applied(_)
+    ));
+    assert_eq!(a.members().len(), 1);
+
+    let after = a.send(&alice.provider, &alice.signer, b"after").unwrap();
+    assert!(
+        b.process(&bob.provider, &after).is_err(),
+        "a removed member read a later message"
+    );
+}
+
+#[test]
+fn the_last_owner_cannot_leave_and_must_dissolve() {
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (mut a, mut _b) = room_of_two(&alice, &bob);
+
+    // Alice is the only owner: Bob was added as a member, not an owner.
+    assert_eq!(a.owners().unwrap().len(), 1);
+    assert!(a.owners().unwrap().contains(&alice.key()));
+
+    assert_eq!(
+        a.leave(&alice.provider, &alice.signer).unwrap_err(),
+        RoomError::LastOwner
+    );
+    // Bob, a plain member, may always propose to go.
+    assert!(_b.leave(&bob.provider, &bob.signer).is_ok());
+    assert_eq!(
+        a.dismiss_owner(&alice.provider, &alice.signer, &alice.key())
+            .unwrap_err(),
+        RoomError::LastOwner
+    );
+    assert_eq!(
+        a.remove_member(&alice.provider, &alice.signer, &alice.key())
+            .unwrap_err(),
+        RoomError::LastOwner
+    );
+
+    // Dissolving is the way out, and it hands back the root so the client can
+    // derive every chunk name to delete.
+    let d = a.dissolve().unwrap();
+    assert_eq!(d.root.expose(), root(1).expose());
+}
+
+#[test]
+fn an_owner_may_leave_once_another_exists() {
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (mut a, mut b) = room_of_two(&alice, &bob);
+
+    let c = a
+        .appoint_owner(&alice.provider, &alice.signer, &bob.key())
+        .unwrap();
+    b.process(&bob.provider, &c.commit).unwrap();
+    assert_eq!(a.owners().unwrap().len(), 2);
+    assert_eq!(
+        a.owners().unwrap(),
+        b.owners().unwrap(),
+        "owner set did not replicate"
+    );
+
+    // Now Alice may go — but leaving is two steps: she proposes, Bob commits.
+    // MLS does not let a member commit their own removal.
+    let proposal = a
+        .leave(&alice.provider, &alice.signer)
+        .expect("alice may leave");
+    assert!(matches!(
+        b.process(&bob.provider, &proposal).unwrap(),
+        Event::Proposed
+    ));
+    assert_eq!(b.members().len(), 2, "a proposal alone must change nothing");
+
+    let c = b
+        .commit_pending(&bob.provider, &bob.signer)
+        .expect("bob commits the departure");
+    assert_eq!(b.members().len(), 1, "alice is gone");
+    assert!(!b.members().contains(&alice.key()));
+
+    // And Alice, applying the same commit, agrees she is out.
+    a.process(&alice.provider, &c.commit).ok();
+}
+
+#[test]
+fn a_one_to_one_is_a_room_of_two_owners_on_the_same_path() {
+    // Build-notes §4: "Do not implement a separate 1:1 code path."
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (mut a, mut b) = room_of_two(&alice, &bob);
+    let c = a
+        .appoint_owner(&alice.provider, &alice.signer, &bob.key())
+        .unwrap();
+    b.process(&bob.provider, &c.commit).unwrap();
+
+    // Both are owners, and the logic is symmetric: each can do what the other can.
+    assert!(a.owners().unwrap().contains(&alice.key()));
+    assert!(a.owners().unwrap().contains(&bob.key()));
+
+    // Bob, an owner by appointment rather than by creation, can dismiss Alice.
+    let c = b
+        .dismiss_owner(&bob.provider, &bob.signer, &alice.key())
+        .unwrap();
+    a.process(&alice.provider, &c.commit).unwrap();
+    assert_eq!(a.owners().unwrap().len(), 1);
+    assert!(a.owners().unwrap().contains(&bob.key()));
+
+    // And Alice, now a plain member, cannot.
+    assert_eq!(
+        a.appoint_owner(&alice.provider, &alice.signer, &alice.key())
+            .unwrap_err(),
+        RoomError::NotAnOwner
+    );
+}
+
+#[test]
+fn a_non_owner_cannot_manage_the_room() {
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (_a, mut b) = room_of_two(&alice, &bob);
+    let carol = Client::new(3);
+    let kp = key_package(&carol.provider, &carol.key(), &carol.signer).unwrap();
+
+    assert_eq!(
+        b.add_member(&bob.provider, &bob.signer, kp.key_package())
+            .unwrap_err(),
+        RoomError::NotAnOwner
+    );
+    assert_eq!(
+        b.remove_member(&bob.provider, &bob.signer, &alice.key())
+            .unwrap_err(),
+        RoomError::NotAnOwner
+    );
+    assert_eq!(
+        b.appoint_owner(&bob.provider, &bob.signer, &bob.key())
+            .unwrap_err(),
+        RoomError::NotAnOwner
+    );
+    assert_eq!(b.dissolve().unwrap_err(), RoomError::NotAnOwner);
+}
+
+#[test]
+fn removing_an_owner_drops_them_from_the_owner_set_atomically() {
+    // Two commits would leave a window in which a removed member is still an
+    // owner, and MLS gives no way to make two commits atomic.
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (mut a, mut b) = room_of_two(&alice, &bob);
+    let c = a
+        .appoint_owner(&alice.provider, &alice.signer, &bob.key())
+        .unwrap();
+    b.process(&bob.provider, &c.commit).unwrap();
+    assert_eq!(a.owners().unwrap().len(), 2);
+
+    a.remove_member(&alice.provider, &alice.signer, &bob.key())
+        .unwrap();
+    assert_eq!(a.members().len(), 1);
+    assert!(
+        !a.owners().unwrap().contains(&bob.key()),
+        "a removed member stayed an owner"
+    );
+}
+
+#[test]
+fn the_mls_credential_is_the_spark_identity() {
+    // A leaf is provably the Spark identity it claims: one identity, not two that
+    // have to be kept in step.
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (a, _b) = room_of_two(&alice, &bob);
+    let members = a.members();
+    assert!(members.contains(&alice.key()));
+    assert!(members.contains(&bob.key()));
+    assert_eq!(a.me().unwrap(), alice.key());
+}
+
+#[test]
+fn a_room_without_an_owner_set_is_not_a_spark_room() {
+    // OwnerSet::decode is the boundary check; malformed input must not be coerced
+    // into an empty set, which would read as "no owners" rather than "not ours".
+    assert_eq!(
+        OwnerSet::decode(&[0u8; 31]).unwrap_err(),
+        OwnerSetError::Malformed
+    );
+    assert_eq!(
+        OwnerSet::decode(&[7u8; 64]).unwrap_err(),
+        OwnerSetError::Malformed
+    ); // duplicates
+    assert!(OwnerSet::decode(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn the_owner_set_encoding_is_canonical() {
+    // Two clients that agree on the set must produce identical bytes, or the
+    // group context hash differs between members who agree.
+    let (k1, k2) = (Client::new(1).key(), Client::new(2).key());
+    let a = OwnerSet::founder(&k1).with(&k2);
+    let b = OwnerSet::founder(&k2).with(&k1);
+    assert_eq!(
+        a.encode(),
+        b.encode(),
+        "owner set encoding depends on insertion order"
+    );
+    assert_eq!(a, b);
+
+    // Idempotent in both directions.
+    assert_eq!(a.with(&k1), a);
+    assert_eq!(a.without(&k1).without(&k1), a.without(&k1));
+}

@@ -11,12 +11,15 @@ A private, phone-number-free messenger that does one thing: chat.
 
 ## Status
 
-**Stage 2 of 12** (`Spark-build-notes.md` §5): identity, offline. `spark-crypto`
-and `spark-identity` are implemented; every other crate is still a stub.
+**Stage 4 of 12** (`Spark-build-notes.md` §5): rooms, owners, MLS.
+`spark-crypto`, `spark-identity`, `spark-chunk`, `spark-keyring` and `spark-mls`
+are implemented; the rest are still stubs. Nothing has touched a network yet, by
+construction — all five are `pure` crates, and gate 4 runs two clients in one
+process.
 
 ```bash
-cargo test --workspace             # 30 tests
-scripts/verify-reproducible.sh     # 65 artifacts byte-identical across two builds
+cargo test --workspace             # 63 tests
+scripts/verify-reproducible.sh     # 128 artifacts byte-identical across two builds
 ```
 
 **Gate 1** — invariant tests fail against a deliberately broken stub; two
@@ -39,6 +42,67 @@ constructors it already imports.
 The derivation chain in `docs/protocol.md` §2 was verified against an independent
 Python implementation of PBKDF2-HMAC-SHA512 and HKDF-SHA256, and the mnemonic
 against the official BIP-39 test vector.
+
+**Gate 3** — chunks decrypt from the seed alone via the keyring, and are inert
+without it. Both hold. `crates/spark-keyring/tests/recovery.rs` is written as two
+phases with a hard wall between them: the first builds an account and hands only
+what a server would hold to the second, which starts from 24 words and nothing
+else. The inert half asserts that the servers' entire contents contain no
+plaintext, that a wrong seed opens neither the keyring nor any delta, and that a
+correctly guessed message cannot be used to locate the chunk holding it.
+
+**Gate 4** — every member sees identical history; a removed member cannot read
+later messages; the last owner cannot leave without dissolving; a 1:1 uses the
+same owner logic. All four hold, in `crates/spark-mls/tests/rooms.rs`.
+
+## The envelope
+
+```text
+mnemonic ──HKDF──▶ keyring_key ──▶ [sealed keyring blob at addr]
+                                         │
+                                         ├─▶ room_root ──▶ room chunk keys ──▶ history
+                                         └─▶ receipts, uploads, tokens, names
+```
+
+Two ciphertext layers, and the server holds both and can open neither. Nothing
+else contributes — no device key, no escrow share — which is exactly why losing
+the seed loses everything.
+
+The two naming schemes are deliberately different:
+
+| | Media | Room log |
+|---|---|---|
+| Name | `SHA-256(chunk)` | `HMAC(room_root, lane ‖ seq)` |
+| Store can verify the name | yes | no |
+| Outsider can compute it | given the file | never |
+| Deduplicates | server-wide | not at all |
+
+Files are hard to guess; sentences are not.
+
+## Rooms
+
+`spark-mls` implements the *policy* on top of MLS, and nothing cryptographic
+(build-notes §3: do not implement MLS). The owner set lives in an MLS group
+context extension rather than in application state, because F4 says simultaneous
+dismissals resolve by MLS commit order — putting the set in the group context
+makes that true for free, since changing it *is* a commit and MLS already totally
+orders commits.
+
+The MLS signature key **is** the Spark identity key, so a leaf is provably the
+identity it claims and `LaneId::message(sign_pub)` names the same key that signed
+the commit. One identity, not two that have to be kept in step.
+
+Two things the API states plainly because they are easy to get wrong:
+
+* **Joining takes the room root as a parameter.** MLS forward secrecy means a
+  joiner cannot decrypt pre-join history on its own, so an existing member
+  re-shares it out of band. That is the mechanism F4 flags as sitting outside
+  MLS's guarantees, confined to one value and visible in one function signature.
+* **Leaving returns a proposal, not a commit.** MLS does not let a member commit
+  their own removal, so a departure is not final until an owner commits it. A
+  member therefore cannot unilaterally leave a room whose owners have stopped
+  responding; F4 provides no takeover mechanism and this crate does not invent
+  one.
 
 ## Setup
 

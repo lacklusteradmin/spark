@@ -10,24 +10,27 @@
 //! type discipline that keeps key material from leaking through `Debug`, `==`,
 //! or a forgotten `drop`.
 //!
-//! Two primitives named in `docs/protocol.md` §1 are not here yet: the chunk AEAD
-//! (XChaCha20-Poly1305) arrives with stage 3, and the RFC 9474 blind signature
-//! client with stage 8. Each lands with the stage that first needs it, so nothing
-//! ships untested.
+//! One primitive named in `docs/protocol.md` §1 is not here yet: the RFC 9474
+//! blind signature client arrives with stage 8. Each lands with the stage that
+//! first needs it, so nothing ships untested.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod aead;
 pub mod hash;
 pub mod kdf;
 pub mod kem;
+pub mod mac;
 pub mod mnemonic;
 pub mod secret;
 pub mod sign;
 
+pub use aead::{AeadError, NONCE_LEN, Nonce, TAG_LEN};
 pub use hash::{Digest32, sha256, sha256_parts};
 pub use kdf::{Prk, expand, extract};
 pub use kem::{KemPublic, KemSecret};
+pub use mac::hmac_sha256_parts;
 pub use mnemonic::{Mnemonic, MnemonicError, Seed};
 pub use secret::Secret;
 pub use sign::{Signature, SignatureError, SigningKey, VerifyingKey};

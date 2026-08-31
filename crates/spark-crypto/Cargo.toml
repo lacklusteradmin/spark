@@ -18,3 +18,11 @@ x25519-dalek = { version = "2", default-features = false, features = ["static_se
 bip39 = { version = "2", default-features = false, features = ["std"] }
 zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
 subtle = { version = "2", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hmac = { version = "0.12", default-features = false }
+serde = { version = "1", default-features = false, optional = true }
+
+[features]
+# Serialization of `Secret` is opt-in and used in exactly one place: encoding the
+# keyring *before* it is sealed. Nothing else may turn this on.
+serde = ["dep:serde"]
