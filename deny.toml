@@ -11,6 +11,12 @@
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# `wildcards` exists to catch `foo = "*"` against a registry, where it means "give
+# me whatever is newest". A path dependency inside this workspace has no version
+# because there is nothing to resolve — it is the crate next door, built from the
+# same commit. Denying those would flag every internal edge and teach us to
+# ignore the rule.
+allow-wildcard-paths = true
 
 # D7 and F4 are architectural, so they are enforced here rather than remembered.
 # An HTML fetcher or parser in the client is the first step toward link previews
@@ -33,9 +39,32 @@ deny = [
   { name = "sentry" }, { name = "opentelemetry" }, { name = "datadog-statsd" },
 ]
 
+# MPL-2.0 covers hpke-rs and its backends, which OpenMLS needs for HPKE and which
+# there is no permissive alternative to. It is file-level copyleft: it obliges
+# publishing modifications to those files, which Spark already does, being AGPL
+# and open source. It does not reach the rest of the tree.
 [licenses]
-allow = ["AGPL-3.0-or-later", "AGPL-3.0", "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "CC0-1.0"]
+allow = [
+  "AGPL-3.0-or-later", "AGPL-3.0", "Apache-2.0", "MIT", "BSD-2-Clause",
+  "BSD-3-Clause", "ISC", "Unicode-3.0", "CC0-1.0", "MPL-2.0",
+]
 confidence-threshold = 0.93
 
 [advisories]
 yanked = "deny"
+
+# Ignored by ID, never by category: a new advisory on anything still fails here.
+ignore = [
+  { id = "RUSTSEC-2026-0173", reason = """
+proc-macro-error2 is unmaintained. Not a vulnerability — an unmaintained notice.
+
+It is a build-time proc macro reached only through the dev-dependency graph:
+openmls_rust_crypto -> hpke-rs -> libcrux-sha3 -> hax-lib-macros. It executes at
+compile time in the test build and links into no shipped artifact. The advisory
+itself says no safe upgrade is available, so the only alternatives are dropping
+OpenMLS's crypto provider or pinning an older tree — both worse.
+
+Revisit when openmls_rust_crypto next bumps its libcrux dependency; if it is
+still here then, raise it upstream rather than extending this entry.
+""" },
+]

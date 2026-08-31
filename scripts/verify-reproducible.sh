@@ -10,6 +10,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# macOS ships `shasum` (perl); slim Linux images ship `sha256sum` (coreutils) and
+# often no perl at all. Pick whichever exists rather than assuming a platform.
+if command -v sha256sum >/dev/null 2>&1; then
+  hash_of() { sha256sum "$1" | cut -d" " -f1; }
+else
+  hash_of() { shasum -a 256 "$1" | cut -d" " -f1; }
+fi
+export -f hash_of 2>/dev/null || true
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/spark-repro.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 A="$WORK/build-alpha"
@@ -40,7 +49,7 @@ manifest() {
         \( -perm -u+x -o -name '*.rlib' \) \
         ! -name '*.dylib' ! -name '*.so' ! -name '*.dll' \
       | LC_ALL=C sort | while read -r f; do
-          printf '%s  %s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "${f#./}"
+          printf '%s  %s\n' "$(hash_of "$f")" "${f#./}"
         done )
 }
 

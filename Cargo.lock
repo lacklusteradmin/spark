@@ -1813,6 +1813,8 @@ name = "spark-content-server"
 version = "0.0.0"
 dependencies = [
  "spark-chunk",
+ "spark-crypto",
+ "spark-store",
 ]
 
 [[package]]
@@ -1849,10 +1851,24 @@ dependencies = [
 [[package]]
 name = "spark-invariants"
 version = "0.0.0"
+dependencies = [
+ "spark-chunk",
+ "spark-content-server",
+ "spark-crypto",
+ "spark-identity",
+ "spark-issuer",
+ "spark-keyring",
+ "spark-keyring-server",
+ "spark-store",
+]
 
 [[package]]
 name = "spark-issuer"
 version = "0.0.0"
+dependencies = [
+ "spark-crypto",
+ "spark-store",
+]
 
 [[package]]
 name = "spark-keyring"
@@ -1871,6 +1887,8 @@ name = "spark-keyring-server"
 version = "0.0.0"
 dependencies = [
  "spark-chunk",
+ "spark-crypto",
+ "spark-store",
 ]
 
 [[package]]
@@ -1884,6 +1902,10 @@ dependencies = [
  "spark-crypto",
  "spark-identity",
 ]
+
+[[package]]
+name = "spark-store"
+version = "0.0.0"
 
 [[package]]
 name = "spark-sync"

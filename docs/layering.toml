@@ -99,25 +99,34 @@ role  = "scripted verification harness. Not a user-facing product."
 # ---- servers: separate graph, never depended on by client crates ----
 
 [[crate]]
+name  = "spark-store"
+layer = 9
+zone  = "io"
+deps  = []
+role  = "storage that describes its own shape. Every write records its field names, so Db::inventory reports what a server actually stored rather than what someone wrote down. This is what makes gate 5 checkable against the code instead of against a hand-written schema."
+
+[[crate]]
 name  = "spark-keyring-server"
 layer = 10
 zone  = "io"
-deps  = ["spark-chunk"]
-role  = "trust domain 1: addr blobs, quota counters, token withdrawal"
+deps  = ["spark-crypto", "spark-chunk", "spark-store"]
+role  = "trust domain 1: addr blobs, quota counters, token withdrawal. The only service that knows an account-shaped identifier exists"
 
 [[crate]]
 name  = "spark-content-server"
 layer = 10
 zone  = "io"
-deps  = ["spark-chunk"]
-role  = "trust domain 2: account-free chunk store, write-once, receipts"
+# spark-crypto is a dev-dependency: the rule tests need Secret to build room roots
+# and chunk keys. Declared rather than exempted — a test-only edge is still an edge.
+deps  = ["spark-crypto", "spark-chunk", "spark-store"]
+role  = "trust domain 2: account-free chunk store, write-once, receipts. Writes carry a blind token; reads carry nothing at all"
 
 [[crate]]
 name  = "spark-issuer"
 layer = 10
 zone  = "io"
-deps  = []
-role  = "trust domain 3: name mapping, blind signing, payment nodes"
+deps  = ["spark-crypto", "spark-store"]
+role  = "trust domain 3: name mapping (overwritten on transfer, never appended), blind signing, payment nodes"
 
 # Crates in `pure` must not reach these, directly or transitively.
 [io_crates]

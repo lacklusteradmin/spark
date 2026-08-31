@@ -10,6 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install 1.94.1 --profile minimal -c rustfmt -c clippy
+      - run: rustc --version
       - run: cargo test -p spark-invariants -- --nocapture
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -33,29 +34,37 @@ jobs:
       - run: scripts/verify-reproducible.sh
 
   cross-machine:
-    # Same commit, different runner image. A build that is deterministic only on
-    # one machine does not give a user any way to check the binary they were
-    # shipped, which is the whole point of D4.
+    # Two different machines, one pinned environment.
+    #
+    # The previous version of this job compared ubuntu-latest against
+    # ubuntu-22.04 and failed, correctly. Reproducibility says the same *inputs*
+    # give the same output, and the environment is an input: two distro images
+    # have different glibc, different system linkers, and different `cc`. Rust
+    # links against all three, so the bytes differ for a reason that is not a bug.
+    # The old job was asserting something reproducible builds never promised.
+    #
+    # Pinning a container fixes the real problem instead of lowering the bar. The
+    # environment is now identical by construction, `replica` gives two distinct
+    # runner VMs, and the image is the one a third party would use to check a
+    # release for themselves — which is the entire point of D4.
     needs: reproducible
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-22.04]
-    runs-on: ${{ matrix.os }}
+        replica: [a, b]
+    runs-on: ubuntu-latest
+    container: rust:1.94.1-slim-bookworm
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install 1.94.1 --profile minimal
-      # Outside the workspace: build-repro.sh rejects a target dir inside the
-      # repo, because the two --remap-path-prefix rules would then overlap.
-      - run: scripts/build-repro.sh "$RUNNER_TEMP/out"
+      - run: scripts/build-repro.sh /tmp/out
       - run: |
-          cd "$RUNNER_TEMP/out/release"
+          cd /tmp/out/release
           find . -maxdepth 2 -type f \( -perm -u+x -o -name '*.rlib' \) \
             ! -name '*.dylib' ! -name '*.so' ! -name '*.dll' \
-            | LC_ALL=C sort | xargs shasum -a 256 | tee "$GITHUB_WORKSPACE/manifest-${{ matrix.os }}.txt"
+            | LC_ALL=C sort | xargs sha256sum | tee "$GITHUB_WORKSPACE/manifest-${{ matrix.replica }}.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: manifest-${{ matrix.os }}
-          path: manifest-${{ matrix.os }}.txt
+          name: manifest-${{ matrix.replica }}
+          path: manifest-${{ matrix.replica }}.txt
 
   compare-machines:
     # The job above only *produces* two manifests. Without this one, nothing ever
@@ -69,10 +78,11 @@ jobs:
           merge-multiple: true
       - run: |
           set -eu
-          a=manifest-ubuntu-latest.txt
-          b=manifest-ubuntu-22.04.txt
-          if diff -u "$a" "$b"; then
-            echo "PASS: identical artifacts across two runner images"
+          for f in manifest-a.txt manifest-b.txt; do
+            [ -s "$f" ] || { echo "FAIL: $f is missing or empty" >&2; exit 1; }
+          done
+          if diff -u manifest-a.txt manifest-b.txt; then
+            echo "PASS: $(wc -l < manifest-a.txt) artifacts identical on two machines"
           else
             echo "FAIL: the same commit built differently on two machines" >&2
             exit 1

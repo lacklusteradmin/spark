@@ -11,15 +11,13 @@ A private, phone-number-free messenger that does one thing: chat.
 
 ## Status
 
-**Stage 4 of 12** (`Spark-build-notes.md` §5): rooms, owners, MLS.
-`spark-crypto`, `spark-identity`, `spark-chunk`, `spark-keyring` and `spark-mls`
-are implemented; the rest are still stubs. Nothing has touched a network yet, by
-construction — all five are `pure` crates, and gate 4 runs two clients in one
-process.
+**Stage 5 of 12** (`Spark-build-notes.md` §5): the servers. All five client
+`pure` crates and all three services are implemented. `spark-transport`,
+`spark-tokens`, `spark-sync`, `spark-client`, `spark-ffi` are still stubs.
 
 ```bash
-cargo test --workspace             # 63 tests
-scripts/verify-reproducible.sh     # 128 artifacts byte-identical across two builds
+cargo test --workspace             # 76 tests
+scripts/verify-reproducible.sh     # 130 artifacts byte-identical across two builds
 ```
 
 **Gate 1** — invariant tests fail against a deliberately broken stub; two
@@ -54,6 +52,15 @@ correctly guessed message cannot be used to locate the chunk holding it.
 **Gate 4** — every member sees identical history; a removed member cannot read
 later messages; the last owner cannot leave without dissolving; a 1:1 uses the
 same owner logic. All four hold, in `crates/spark-mls/tests/rooms.rs`.
+
+**Gate 5** — permitted-knowledge tests pass against the real server. They do, in
+`crates/spark-invariants/tests/gate5_servers.rs`, and the check is stronger than
+stage 1's: `spark-store` records the field names of every write, so
+`Db::inventory` reports what a service *actually* stored rather than what someone
+wrote down. Three assertions run against a live session — subset of the
+whitelist, agreement with the hand-written `server/*-schema.toml`, and no
+plaintext or graph edge anywhere. Each was confirmed by deliberately breaking it
+first.
 
 ## The envelope
 
@@ -103,6 +110,24 @@ Two things the API states plainly because they are easy to get wrong:
   member therefore cannot unilaterally leave a room whose owners have stopped
   responding; F4 provides no takeover mechanism and this crate does not invent
   one.
+
+## The three services
+
+Separately deployed, separately operated. Blind vouchers cut the payment-to-key
+link cryptographically, but an issuer sharing a process with the keyring service
+would rejoin it through request timing and operational logs.
+
+| | Knows | Authenticates by |
+|---|---|---|
+| Keyring | `hash(pubkey)`, blob size, mtime, quota and rate counters | Ed25519 challenge — stateless, an HMAC of the address under a server secret and the minute |
+| Content | chunk name, bytes, receipt count, spent token serials. **No accounts** | writes: a blind token. reads: nothing at all |
+| Issuer | name → key, paid-until, issuance count | blind (the voucher, not the caller) |
+
+Rules that are easy to "improve" into a leak, so each has its own test in
+`server/spark-content-server/tests/rules.rs`: a name is write-once (the commit
+lane's arbitration point, and the backstop that makes derived room-chunk nonces
+safe); a duplicate upload is charged in full and answered identically to a fresh
+one; media is freed at zero holders while room chunks are deleted outright.
 
 ## Setup
 

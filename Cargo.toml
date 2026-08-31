@@ -13,12 +13,18 @@ members = [
   "crates/spark-ffi",
   "crates/spark-cli",
   "crates/spark-invariants",
+  "server/spark-store",
   "server/spark-keyring-server",
   "server/spark-content-server",
   "server/spark-issuer",
 ]
 
 [workspace.package]
+# Nothing here goes to crates.io. Spark is distributed as a repository to fork and
+# audit (F10), and the crate names are internal architecture, not a public API.
+# Saying so explicitly also makes `cargo publish` fail rather than succeed by
+# accident, and lets cargo-deny treat internal path edges as what they are.
+publish = false
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.94"
@@ -35,6 +41,7 @@ spark-sync      = { path = "crates/spark-sync" }
 spark-transport = { path = "crates/spark-transport" }
 spark-tokens    = { path = "crates/spark-tokens" }
 spark-client    = { path = "crates/spark-client" }
+spark-store     = { path = "server/spark-store" }
 
 # Reproducible release builds (D4): one codegen unit, no parallel partitioning.
 [profile.release]

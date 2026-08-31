@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 # Audited implementations only (build-notes §1). Every entry here is a primitive
 # named in docs/protocol.md §1; adding one that is not requires a decision record.
