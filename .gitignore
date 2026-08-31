@@ -1,5 +1,9 @@
 /target
 **/*.rs.bk
 .DS_Store
-/repro-a
-/repro-b
+
+#AI
+AGENTS.md
+CLAUDE.md
+
+/out

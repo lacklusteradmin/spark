@@ -11,16 +11,34 @@ A private, phone-number-free messenger that does one thing: chat.
 
 ## Status
 
-**Stage 1 of 12** (`Spark-build-notes.md` §5): protocol doc, skeleton, invariant
-harness. Every crate is a stub. No cryptography is implemented yet — stage 2 is
-where identity begins.
-
-Gate 1 requires two things, and both hold:
+**Stage 2 of 12** (`Spark-build-notes.md` §5): identity, offline. `spark-crypto`
+and `spark-identity` are implemented; every other crate is still a stub.
 
 ```bash
-cargo test -p spark-invariants     # 14 tests, incl. 6 against deliberately broken stubs
-scripts/verify-reproducible.sh     # 15 artifacts byte-identical across two builds
+cargo test --workspace             # 30 tests
+scripts/verify-reproducible.sh     # 65 artifacts byte-identical across two builds
 ```
+
+**Gate 1** — invariant tests fail against a deliberately broken stub; two
+independent builds of one commit are byte-identical. Both hold. The build
+comparison uses two differently-named target directories outside the repo, so it
+also proves the output does not depend on where it was built. One exclusion, and
+it is printed on every run: host proc-macro dylibs carry their own absolute
+output path in the Mach-O install name, written by the linker after
+`--remap-path-prefix` has run. They never ship, and their output is captured in
+the rlibs, which are compared.
+
+**Gate 2** — the same seed yields identical keys on a clean machine; no code path
+recovers an identity without it. Both hold. The first is
+`crates/spark-identity/tests/vectors.txt`, frozen and committed: a diff there
+means every existing account just lost its history. The second is structural and
+lives in the harness, which reads `spark-identity`'s source and fails on any
+constructor that is not seed-derived — a test inside the crate could only check
+constructors it already imports.
+
+The derivation chain in `docs/protocol.md` §2 was verified against an independent
+Python implementation of PBKDF2-HMAC-SHA512 and HKDF-SHA256, and the mnemonic
+against the official BIP-39 test vector.
 
 ## Setup
 

@@ -354,3 +354,111 @@ pub fn cargo_deps(manifest: &str) -> Vec<String> {
     out.retain(|s| !s.is_empty());
     out
 }
+
+// ------------------------------------------------------- identity constructors
+
+/// Check that `Identity` can only be built from seed material.
+///
+/// Gate 2's second half — "no code path recovers an identity without it" — is a
+/// statement about the *shape* of the API, not about any one function's
+/// behaviour. A test inside `spark-identity` could only check the constructors it
+/// already knows about; this reads the source and fails on a new one.
+///
+/// `source` is `spark-identity/src/lib.rs`. `allowed` is the constructor names
+/// that legitimately take seed material. Anything else that returns an `Identity`
+/// is a recovery path, whatever it is called.
+pub fn check_identity_constructors(source: &str, allowed: &[&str]) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut in_impl = false;
+    let mut depth = 0i32;
+
+    for (n, line) in source.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        let trimmed = code.trim();
+
+        if !in_impl && trimmed.starts_with("impl Identity") {
+            in_impl = true;
+            depth = 0;
+        }
+        if in_impl {
+            depth += code.matches('{').count() as i32 - code.matches('}').count() as i32;
+            if depth <= 0 && trimmed.ends_with('}') && !trimmed.starts_with("impl") {
+                in_impl = false;
+            }
+        }
+
+        // A constructor is any public fn whose return type is the type itself.
+        let returns_self = code.contains("-> Self")
+            || code.contains("-> Identity")
+            || code.contains("Result<Self")
+            || code.contains("Result<Identity");
+        if !(in_impl && trimmed.starts_with("pub fn") && returns_self) {
+            continue;
+        }
+        let name = trimmed
+            .trim_start_matches("pub fn")
+            .trim()
+            .split(['(', '<'])
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !allowed.contains(&name) {
+            v.push(format!(
+                "spark-identity/src/lib.rs:{}: `Identity::{name}` builds an identity but is not a \
+                 declared seed-derived constructor. Gate 2 requires that no code path recovers an \
+                 identity without the seed.",
+                n + 1
+            ));
+        }
+    }
+
+    // The other way in: a trait that reconstructs the struct from bytes. A derive
+    // sits on the line *above* the item it applies to, so a single-line scan would
+    // miss exactly the shape this is meant to catch.
+    const REBUILDS: [&str; 4] = ["Deserialize", "Default", "From<[u8", "FromStr"];
+    let lines: Vec<&str> = source
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect();
+
+    for (n, code) in lines.iter().enumerate() {
+        let t = code.trim();
+
+        // `#[derive(..)]` — find the item it decorates, skipping further attributes.
+        if let Some(list) = t
+            .strip_prefix("#[derive(")
+            .and_then(|x| x.split(')').next())
+        {
+            let item = lines[n + 1..]
+                .iter()
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .unwrap_or("");
+            if item.contains("Identity") {
+                for bad in REBUILDS {
+                    if list.contains(bad) {
+                        v.push(format!(
+                            "spark-identity/src/lib.rs:{}: `#[derive({bad})]` on Identity \
+                             reconstructs one without a seed",
+                            n + 1
+                        ));
+                    }
+                }
+            }
+        }
+
+        // `impl Deserialize for Identity`, `impl From<[u8; 32]> for Identity`, ...
+        if t.starts_with("impl") && t.contains("for Identity") {
+            for bad in REBUILDS {
+                if t.contains(bad) {
+                    v.push(format!(
+                        "spark-identity/src/lib.rs:{}: `impl {bad} for Identity` reconstructs one \
+                         without a seed",
+                        n + 1
+                    ));
+                }
+            }
+        }
+    }
+    v
+}

@@ -44,10 +44,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install 1.94.1 --profile minimal
-      - run: scripts/build-repro.sh "$PWD/out"
+      # Outside the workspace: build-repro.sh rejects a target dir inside the
+      # repo, because the two --remap-path-prefix rules would then overlap.
+      - run: scripts/build-repro.sh "$RUNNER_TEMP/out"
       - run: |
-          cd out/release
-          find . -maxdepth 1 -type f \( -perm -u+x -o -name '*.rlib' \) \
+          cd "$RUNNER_TEMP/out/release"
+          find . -maxdepth 2 -type f \( -perm -u+x -o -name '*.rlib' \) \
+            ! -name '*.dylib' ! -name '*.so' ! -name '*.dll' \
             | LC_ALL=C sort | xargs shasum -a 256 | tee "$GITHUB_WORKSPACE/manifest-${{ matrix.os }}.txt"
       - uses: actions/upload-artifact@v4
         with:

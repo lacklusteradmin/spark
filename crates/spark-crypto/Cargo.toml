@@ -5,4 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# Audited implementations only (build-notes §1). Every entry here is a primitive
+# named in docs/protocol.md §1; adding one that is not requires a decision record.
+#
+# No `getrandom`, deliberately. Entropy enters through a parameter, never through
+# a hidden syscall — see mnemonic::Mnemonic::from_entropy.
 [dependencies]
+sha2 = { version = "0.10", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+bip39 = { version = "2", default-features = false, features = ["std"] }
+zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
+subtle = { version = "2", default-features = false }
