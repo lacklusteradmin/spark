@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt,clippy
+      - run: rustup toolchain install 1.94.1 --profile minimal -c rustfmt -c clippy
       - run: cargo test -p spark-invariants -- --nocapture
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -53,3 +53,24 @@ jobs:
         with:
           name: manifest-${{ matrix.os }}
           path: manifest-${{ matrix.os }}.txt
+
+  compare-machines:
+    # The job above only *produces* two manifests. Without this one, nothing ever
+    # asserts they match, and the cross-machine gate passes while proving nothing.
+    needs: cross-machine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: manifest-*
+          merge-multiple: true
+      - run: |
+          set -eu
+          a=manifest-ubuntu-latest.txt
+          b=manifest-ubuntu-22.04.txt
+          if diff -u "$a" "$b"; then
+            echo "PASS: identical artifacts across two runner images"
+          else
+            echo "FAIL: the same commit built differently on two machines" >&2
+            exit 1
+          fi
