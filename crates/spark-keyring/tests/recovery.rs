@@ -92,23 +92,28 @@ fn phase_one() -> (Servers, Addr) {
     }
 
     // Share a photo. Convergent, so the name is the hash of the finished chunk.
-    let (photo_name, photo_key, photo_chunk) = media::seal(PHOTO);
+    let (photo_name, photo_key, photo_chunk) = media::seal_raw(PHOTO);
     servers.put(photo_name, photo_chunk);
 
     // The keyring: a snapshot, then deltas for what happened after it.
     let mut k = Keyring::new();
     k.apply(&Delta::UpsertRoom(Room {
         id: room_id,
-        root,
+        generations: vec![Generation {
+            epoch: 0,
+            root,
+            heads: vec![],
+        }],
+        mls_state: None,
         display_name: "usual place".into(),
         my_lane: lane.into(),
-        heads: vec![],
     }));
     let snapshot = k.seal_snapshot(id.keyring_key(), &nonce(1));
 
     let deltas = vec![
         Delta::AdvanceHead {
             room: room_id,
+            epoch: 0,
             lane: lane.into(),
             seq: 2,
         }
@@ -162,13 +167,25 @@ fn history_decrypts_from_the_seed_alone() {
     // asked what belongs to this room, and could not have answered.
     let lane: LaneId = r.my_lane.into();
     let mut recovered = Vec::new();
-    for seq in 0..=k.head(r.id, lane).unwrap() {
-        let slot = Slot::new(lane, seq);
-        let chunk = servers
-            .get(room::name(&r.root, slot))
-            .expect("chunk at derived name");
-        let plain = room::open(&r.root, slot, chunk).expect("chunk opens");
-        recovered.push(String::from_utf8(plain.to_vec()).unwrap());
+    // Walk every generation, oldest first: the archive is only whole if all of
+    // them came back, and a generation cannot be re-derived after the fact.
+    for g in &r.generations {
+        let Some(head) = g
+            .heads
+            .iter()
+            .find(|(l, _)| *l == r.my_lane)
+            .map(|(_, s)| *s)
+        else {
+            continue;
+        };
+        for seq in 0..=head {
+            let slot = Slot::new(lane, seq);
+            let chunk = servers
+                .get(room::name(&g.root, slot))
+                .expect("chunk at derived name");
+            let plain = room::open(&g.root, slot, chunk).expect("chunk opens");
+            recovered.push(String::from_utf8(plain.to_vec()).unwrap());
+        }
     }
     assert_eq!(recovered, MESSAGES, "history did not come back intact");
 
@@ -234,7 +251,7 @@ fn a_guessed_sentence_cannot_be_tested_against_the_store() {
     // like media, this loop would find one.
     let (servers, _) = phase_one();
     for guess in MESSAGES {
-        let (name, _, _) = media::seal(guess.as_bytes());
+        let (name, _, _) = media::seal_raw(guess.as_bytes());
         assert!(
             servers.get(name).is_none(),
             "a guessed sentence located a stored chunk"
@@ -268,19 +285,25 @@ fn an_out_of_order_delta_cannot_rewind_a_lane() {
     let mut k = Keyring::new();
     k.apply(&Delta::UpsertRoom(Room {
         id: room_id,
-        root: Secret::new([3; 32]),
+        generations: vec![Generation {
+            epoch: 0,
+            root: Secret::new([3; 32]),
+            heads: vec![],
+        }],
+        mls_state: None,
         display_name: "r".into(),
         my_lane: lane.into(),
-        heads: vec![],
     }));
 
     k.apply(&Delta::AdvanceHead {
         room: room_id,
+        epoch: 0,
         lane: lane.into(),
         seq: 9,
     });
     k.apply(&Delta::AdvanceHead {
         room: room_id,
+        epoch: 0,
         lane: lane.into(),
         seq: 4,
     });

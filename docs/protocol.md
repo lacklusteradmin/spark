@@ -191,10 +191,42 @@ RoomChunk {
   payload:   Payload,
 }
 
-Payload = Commit(MlsMessageOut)          // commit lane only
-        | Application(MlsMessageOut)     // message lanes only
-        | LaneAdvert                     // heartbeat carrying only `clock`
+Payload = Commit(MlsMessage)   // commit lane only; consumed live, never replayed
+        | Application(Signed)  // message lanes only; see below
+        | LaneAdvert           // heartbeat carrying only `clock`
+
+Signed { body: bytes, sender: [u8;32], sig: [u8;64] }
+  sig covers  "spark/v1/msg" || lane || be64(seq) || be64(epoch) || body
 ```
+
+### 5.0 Why an application message is not an MLS ciphertext
+
+This section previously said `Application(MlsMessageOut)`. **That cannot work**,
+and gate 6 is where it showed.
+
+MLS deletes each sender-ratchet key as it is used and drops past-epoch secrets,
+because that is what forward secrecy *is*. An archive of MLS ciphertexts is
+therefore unreadable after a restore — by anyone, including its owner. F2 promises
+the opposite: history comes back from the seed.
+
+So the archive layer is the room chunk's own AEAD, keyed from `room_root`. This is
+what `Spark-spec.md` F4 already implies when it says an existing member "re-shares
+the historical keys", and under decision D-A there is no separate MLS delivery
+path to lose, because members read chunks rather than receive messages. MLS
+carries membership, the owner set, and the key agreement that distributes
+`room_root`.
+
+Confidentiality at rest comes from the chunk AEAD. Attribution comes from the
+signature, made with the identity key that is also the MLS credential. D8's
+deniability analysis is unchanged: a signature proves the holder of key X wrote a
+message, not who holds key X.
+
+**Cost, stated plainly.** Forward secrecy no longer protects the archive. Anyone
+holding the seed can read all history, which `Spark-spec.md` F6 already accepts
+("Anyone with the seed, including a court that seizes it, can restore and read the
+history"). What changes is that this is now a property of the design rather than
+an incidental one — there is no epoch after which old messages become unreadable
+to their owner, by construction.
 
 The **vector clock is the sync mechanism**, not a debugging aid. Reading any one
 new chunk tells a client every lane's head as of that write, so discovery does not

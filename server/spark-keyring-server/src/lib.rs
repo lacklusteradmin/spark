@@ -14,7 +14,7 @@
 #![deny(missing_docs)]
 
 use spark_chunk::Chunk;
-use spark_crypto::{Secret, Signature, VerifyingKey, hmac_sha256_parts};
+use spark_crypto::{IssuerKey, IssuerPublic, Secret, Signature, VerifyingKey, hmac_sha256_parts};
 use spark_store::{Cell, Db};
 
 /// Table of keyring snapshots, keyed by address.
@@ -27,6 +27,10 @@ pub const T_QUOTA: &str = "quota";
 pub const T_RATE: &str = "rate";
 /// Table of spent refund vouchers, keyed by voucher.
 pub const T_REFUND: &str = "refund_spent";
+/// Table of pending contact requests, keyed by `addr:index`.
+pub const T_REQUEST: &str = "request";
+/// Requests one address will hold before further ones are dropped.
+pub const MAX_PENDING: usize = 64;
 
 /// Deltas allowed before the client is expected to write a snapshot.
 pub const COMPACT_AFTER: u32 = 64;
@@ -51,10 +55,45 @@ pub enum Request {
     PutSnapshot(Auth, Vec<u8>),
     /// Read quota.
     GetQuota(Auth),
+    /// Fetch the token issuer's public key. Unauthenticated: it is public.
+    GetIssuerKey,
     /// Exchange quota for blind tokens.
-    WithdrawTokens(Auth, u64),
+    ///
+    /// The client sends *blinded* messages. This service debits quota for the
+    /// size class it is told and signs bytes it cannot read; the content service
+    /// later sees the token spent and cannot connect the two. That is the whole
+    /// construction, and the reason a placeholder token that embedded the address
+    /// was a leak rather than a stand-in.
+    WithdrawTokens {
+        /// Who is paying.
+        auth: Auth,
+        /// One blinded message per token.
+        blinded: Vec<Vec<u8>>,
+        /// The size class each token will authorise.
+        size_class: u8,
+    },
     /// Credit a refund voucher returned by the content service.
     CreditRefund(Auth, Vec<u8>, u64),
+
+    /// Leave a contact request for an address.
+    ///
+    /// **Deliberately unauthenticated.** The sender is by definition not the
+    /// holder of the recipient's key, so there is nothing they could sign that
+    /// this service should accept. Spam is priced instead of identified: the
+    /// write costs a blind token, exactly as an upload does, which is the same
+    /// answer F7 gives to the same question.
+    PutRequest {
+        /// Where to leave it.
+        addr: [u8; 32],
+        /// The sealed request. Opaque here.
+        blob: Vec<u8>,
+        /// A blind token, spendable once.
+        token: Vec<u8>,
+    },
+    /// Read the tray. Recipient only.
+    GetRequests(Auth),
+    /// Discard one request, accepted or declined alike.
+    DropRequest(Auth, u32),
 }
 
 /// Proof that the caller holds the key behind an address.
@@ -93,10 +132,23 @@ pub enum Response {
         /// Bytes allowed.
         limit: u64,
     },
-    /// Blind tokens, and the quota they were debited against.
+    /// Blind signatures, one per blinded message. Still blinded: only the client
+    /// can unblind them, which is what makes them unlinkable when spent.
     Tokens(Vec<Vec<u8>>),
+    /// The issuer's public key, for clients and for the content service.
+    IssuerKey(Vec<u8>),
     /// A refund was credited.
     Credited,
+    /// A request was accepted for delivery.
+    ///
+    /// Returned whether or not the tray was full and whether or not the address
+    /// exists. A sender who could tell those apart would have an oracle for
+    /// which addresses are real and which people are ignoring them.
+    RequestTaken,
+    /// The tray, oldest first, as `(index, bytes)`.
+    Requests(Vec<(u32, Vec<u8>)>),
+    /// A request was discarded.
+    RequestDropped,
     /// Refused.
     Refused(Refusal),
 }
@@ -120,6 +172,7 @@ pub enum Refusal {
 #[derive(Clone)]
 pub struct Keyring {
     db: Db,
+    issuer: std::sync::Arc<IssuerKey>,
     server_secret: Secret<32>,
     /// The current minute, supplied rather than read from a clock. A `now()` here
     /// would make every test time-dependent and the challenge unverifiable in a
@@ -132,13 +185,21 @@ fn hex(b: &[u8]) -> String {
 }
 
 impl Keyring {
-    /// A service over `db`, with a server secret used only for challenges.
-    pub fn new(db: Db, server_secret: Secret<32>) -> Self {
+    /// A service over `db`, with a server secret used only for challenges and an
+    /// issuer key for storage tokens.
+    pub fn new(db: Db, server_secret: Secret<32>, issuer: IssuerKey) -> Self {
         Self {
             db,
+            issuer: std::sync::Arc::new(issuer),
             server_secret,
             minute: Default::default(),
         }
+    }
+
+    /// The token issuer's public key, which the content service needs to verify
+    /// spends and clients need to blind against.
+    pub fn issuer_public(&self) -> IssuerPublic {
+        self.issuer.public()
     }
 
     /// The store, for the permitted-knowledge audit.
@@ -177,13 +238,24 @@ impl Keyring {
     pub fn handle(&self, req: Request) -> Response {
         let auth = match &req {
             Request::Challenge { addr } => return Response::Challenge(self.challenge(addr)),
+            Request::PutRequest { addr, blob, token } => {
+                return self.put_request(*addr, blob.clone(), token.clone());
+            }
+            Request::GetIssuerKey => {
+                return match self.issuer.public().to_der() {
+                    Ok(d) => Response::IssuerKey(d),
+                    Err(_) => Response::Refused(Refusal::Malformed),
+                };
+            }
             Request::GetSnapshot(a)
             | Request::GetDeltas(a)
             | Request::PutDelta(a, _)
             | Request::PutSnapshot(a, _)
             | Request::GetQuota(a)
-            | Request::WithdrawTokens(a, _)
-            | Request::CreditRefund(a, _, _) => a,
+            | Request::WithdrawTokens { auth: a, .. }
+            | Request::CreditRefund(a, _, _)
+            | Request::GetRequests(a)
+            | Request::DropRequest(a, _) => a,
         };
         let addr = match self.verify(auth) {
             Ok(a) => a,
@@ -192,7 +264,7 @@ impl Keyring {
         self.count_request(&addr);
 
         match req {
-            Request::Challenge { .. } => unreachable!("handled above"),
+            Request::Challenge { .. } | Request::GetIssuerKey => unreachable!("handled above"),
             Request::GetSnapshot(_) => Response::Snapshot(
                 self.db
                     .field(T_KEYRING, &addr, "snapshot_bytes")
@@ -211,9 +283,85 @@ impl Keyring {
                 used: self.used(&addr),
                 limit: self.limit(&addr),
             },
-            Request::WithdrawTokens(_, n) => self.withdraw(&addr, n),
+            Request::WithdrawTokens {
+                blinded,
+                size_class,
+                ..
+            } => self.withdraw(&addr, &blinded, size_class),
             Request::CreditRefund(_, v, amount) => self.credit(&addr, v, amount),
+            Request::PutRequest { .. } => unreachable!("handled above"),
+            Request::GetRequests(_) => Response::Requests(
+                self.request_keys(&addr)
+                    .into_iter()
+                    .filter_map(|k| {
+                        let i = k.rsplit(':').next()?.parse().ok()?;
+                        let b = self.db.field(T_REQUEST, &k, "request_bytes")?;
+                        Some((i, b.bytes()?.to_vec()))
+                    })
+                    .collect(),
+            ),
+            Request::DropRequest(_, i) => {
+                // No notification goes anywhere. A declined request and one not
+                // yet looked at are the same thing from outside, which is what
+                // makes declining safe to do (F5).
+                self.db.delete(T_REQUEST, &format!("{addr}:{i}"));
+                Response::RequestDropped
+            }
         }
+    }
+
+    fn request_keys(&self, addr: &str) -> Vec<String> {
+        let mut ks: Vec<String> = self
+            .db
+            .keys(T_REQUEST)
+            .into_iter()
+            .filter(|k| k.starts_with(&format!("{addr}:")))
+            .collect();
+        ks.sort_by_key(|k| {
+            k.rsplit(':')
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0)
+        });
+        ks
+    }
+
+    fn put_request(&self, addr: [u8; 32], blob: Vec<u8>, token: Vec<u8>) -> Response {
+        let serial = hex(&token);
+        if !self.db.put_if_absent(
+            T_REQUEST,
+            &format!("token:{serial}"),
+            vec![("request_bytes", Cell::Bytes(token))],
+        ) {
+            // Even this is not distinguishable to a sender who reuses a token by
+            // accident versus one probing: both get the same answer below.
+            return Response::RequestTaken;
+        }
+        let a = hex(&addr);
+        let existing = self.request_keys(&a);
+        if existing.len() < MAX_PENDING {
+            let index = existing
+                .last()
+                .and_then(|k| k.rsplit(':').next())
+                .and_then(|n| n.parse::<u32>().ok())
+                .map_or(0, |n| n + 1);
+            self.db.put(
+                T_REQUEST,
+                &format!("{a}:{index}"),
+                vec![
+                    ("addr", Cell::Text(a)),
+                    ("request_index", Cell::Num(index as u64)),
+                    ("request_bytes", Cell::Bytes(blob)),
+                    (
+                        "mtime",
+                        Cell::Num(self.minute.load(std::sync::atomic::Ordering::SeqCst)),
+                    ),
+                ],
+            );
+        }
+        // Same answer whether it was stored, dropped for a full tray, or sent to
+        // an address that does not exist.
+        Response::RequestTaken
     }
 
     fn delta_keys(&self, addr: &str) -> Vec<String> {
@@ -301,22 +449,32 @@ impl Keyring {
         ]
     }
 
-    fn withdraw(&self, addr: &str, bytes: u64) -> Response {
-        if self.used(addr) + bytes > self.limit(addr) {
+    fn withdraw(&self, addr: &str, blinded: &[Vec<u8>], size_class: u8) -> Response {
+        if !(10..=40).contains(&size_class) {
+            return Response::Refused(Refusal::Malformed);
+        }
+        let cost = (1u64 << size_class) * blinded.len() as u64;
+        if self.used(addr) + cost > self.limit(addr) {
             return Response::Refused(Refusal::OverQuota);
         }
         self.db.bump(
             T_QUOTA,
             addr,
             "quota_media_used",
-            bytes as i64,
+            cost as i64,
             self.quota_row(addr),
         );
-        // Stage 8 replaces this with RFC 9474 blind RSA. What matters already is
-        // the shape: the token the client spends at the content service carries no
-        // link back to this address, and this service records no link forward.
-        let n = self.used(addr);
-        Response::Tokens(vec![format!("token-{addr}-{n}").into_bytes()])
+
+        // Signing blinded bytes. Nothing about `addr` reaches the signature, and
+        // nothing about the signature is recorded here.
+        let mut out = Vec::with_capacity(blinded.len());
+        for b in blinded {
+            match self.issuer.blind_sign(b) {
+                Ok(sig) => out.push(sig),
+                Err(_) => return Response::Refused(Refusal::Malformed),
+            }
+        }
+        Response::Tokens(out)
     }
 
     fn credit(&self, addr: &str, voucher: Vec<u8>, amount: u64) -> Response {

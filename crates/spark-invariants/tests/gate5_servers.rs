@@ -24,6 +24,9 @@ use spark_content_server as content;
 use spark_issuer as issuer;
 use spark_keyring_server as keyring;
 
+mod common;
+use common::{Fixed, issuer, token};
+
 const PHRASE_A: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
                         abandon abandon abandon abandon abandon abandon abandon abandon \
                         abandon abandon abandon abandon abandon abandon abandon art";
@@ -39,6 +42,15 @@ struct Run {
     issuer: issuer::Issuer,
 }
 
+/// A holder's public identity as the issuer stores it: signing key then KEM key.
+fn pub64(id: &Identity) -> [u8; 64] {
+    let p = id.public();
+    let mut b = [0u8; 64];
+    b[..32].copy_from_slice(p.sign.as_bytes());
+    b[32..].copy_from_slice(p.kem.as_bytes());
+    b
+}
+
 fn nonce(n: u8) -> [u8; 24] {
     [n; 24]
 }
@@ -49,8 +61,12 @@ fn exercise() -> Run {
     let alice = Identity::from_phrase(PHRASE_A).unwrap();
     let bob = Identity::from_mnemonic(&Mnemonic::from_entropy(&[2; 32]));
 
-    let ks = keyring::Keyring::new(Db::new(), Secret::new([0xa1; 32]));
-    let cs = content::Content::new(Db::new());
+    let ks = keyring::Keyring::new(
+        Db::new(),
+        Secret::new([0xa1; 32]),
+        spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
+    );
+    let cs = content::Content::new(Db::new(), issuer().public());
     let is = issuer::Issuer::new(Db::new());
     ks.set_minute(1_000_000);
 
@@ -66,19 +82,23 @@ fn exercise() -> Run {
     // --- the room's history goes to the content store, authorised by tokens ---
     let root: room::RoomRoot = Secret::new([0x5a; 32]);
     let lane = LaneId::message(&alice.public().sign);
-    let mut token = 0u64;
-    let mut next_token = || {
-        token += 1;
-        format!("tok-{token}").into_bytes()
+    // Real blind tokens. Serials are per-upload and chosen by the client; the
+    // issuer never sees them, which is why nothing here can be traced back.
+    let mut serial = 0u8;
+    let mut next_serial = move || {
+        serial += 1;
+        serial
     };
 
     for (i, m) in MESSAGES.iter().enumerate() {
         let slot = Slot::new(lane, i as u64);
         let (name, chunk) = room::seal(&root, slot, m.as_bytes());
+        let (claim, tok) = token(next_serial(), chunk.len() as u64);
         let r = cs.handle(content::Request::Put {
             name: *name.as_bytes(),
             chunk: chunk.as_bytes().to_vec(),
-            token: next_token(),
+            claim,
+            token: tok,
         });
         assert!(
             matches!(r, content::Response::Stored { .. }),
@@ -87,13 +107,15 @@ fn exercise() -> Run {
     }
 
     // --- a shared photo, uploaded by both accounts: one chunk, two charges ---
-    let (photo_name, photo_key, photo_chunk) = media::seal(PHOTO);
+    let (photo_name, photo_key, photo_chunk) = media::seal_raw(PHOTO);
     let mut receipts = Vec::new();
     for _ in 0..2 {
+        let (claim, tok) = token(next_serial(), photo_chunk.len() as u64);
         match cs.handle(content::Request::Put {
             name: *photo_name.as_bytes(),
             chunk: photo_chunk.as_bytes().to_vec(),
-            token: next_token(),
+            claim,
+            token: tok,
         }) {
             content::Response::Stored { receipt } => receipts.push(receipt),
             r => panic!("photo upload refused: {r:?}"),
@@ -105,10 +127,14 @@ fn exercise() -> Run {
         let mut k = Keyring::new();
         k.apply(&Delta::UpsertRoom(Room {
             id: RoomId([7; 16]),
-            root: Secret::new([0x5a; 32]),
+            generations: vec![spark_keyring::Generation {
+                epoch: 0,
+                root: Secret::new([0x5a; 32]),
+                heads: vec![],
+            }],
+            mls_state: None,
             display_name: "the usual".into(),
             my_lane: lane.into(),
-            heads: vec![],
         }));
         let snap = k.seal_snapshot(id.keyring_key(), &nonce(1));
         assert_eq!(
@@ -120,6 +146,7 @@ fn exercise() -> Run {
         );
         let d = Delta::AdvanceHead {
             room: RoomId([7; 16]),
+            epoch: 0,
             lane: lane.into(),
             seq: 2,
         }
@@ -128,17 +155,26 @@ fn exercise() -> Run {
             ks.handle(keyring::Request::PutDelta(auth(id), d.as_bytes().to_vec())),
             keyring::Response::Appended { .. }
         ));
-        assert!(matches!(
-            ks.handle(keyring::Request::WithdrawTokens(auth(id), 4096)),
-            keyring::Response::Tokens(_)
-        ));
+        // A real withdrawal: the client blinds locally, the service signs bytes it
+        // cannot read.
+        let pk = ks.issuer_public();
+        let (blinded, w) =
+            spark_tokens::begin(&pk, &mut Fixed(9), &[[id.addr().as_bytes()[0]; 32]], 12).unwrap();
+        let keyring::Response::Tokens(sigs) = ks.handle(keyring::Request::WithdrawTokens {
+            auth: auth(id),
+            blinded,
+            size_class: 12,
+        }) else {
+            panic!("withdrawal refused")
+        };
+        assert_eq!(spark_tokens::finish(&pk, w, &sigs).unwrap().len(), 1);
     }
 
     // --- a name, bought and then transferred to a key the seller never saw ---
     assert_eq!(
         is.handle(issuer::Request::Register {
             name: HANDLE.into(),
-            key: *alice.public().sign.as_bytes(),
+            key: pub64(&alice),
             voucher: b"voucher-1".to_vec(),
             paid_until_day: 20_400,
         }),
@@ -146,11 +182,11 @@ fn exercise() -> Run {
     );
     let mut msg = issuer::TRANSFER_CONTEXT.to_vec();
     msg.extend_from_slice(HANDLE.as_bytes());
-    msg.extend_from_slice(bob.public().sign.as_bytes());
+    msg.extend_from_slice(&pub64(&bob));
     assert_eq!(
         is.handle(issuer::Request::Transfer {
             name: HANDLE.into(),
-            new_key: *bob.public().sign.as_bytes(),
+            new_key: pub64(&bob),
             sig: *alice.sign(&msg).as_bytes(),
         }),
         issuer::Response::Transferred
@@ -360,7 +396,11 @@ fn the_keyring_address_derivation_agrees_across_the_trust_boundary() {
 
 #[test]
 fn a_wrong_key_cannot_authenticate_against_an_address() {
-    let ks = keyring::Keyring::new(Db::new(), Secret::new([0xa1; 32]));
+    let ks = keyring::Keyring::new(
+        Db::new(),
+        Secret::new([0xa1; 32]),
+        spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
+    );
     let alice = Identity::from_phrase(PHRASE_A).unwrap();
     let bob = Identity::from_mnemonic(&Mnemonic::from_entropy(&[2; 32]));
     let addr = *alice.addr().as_bytes();

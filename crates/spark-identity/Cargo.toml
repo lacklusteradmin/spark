@@ -8,4 +8,4 @@ publish.workspace = true
 
 [dependencies]
 spark-crypto.workspace = true
-zeroize = { version = "1", default-features = false, features = ["derive"] }
+zeroize = { version = "1", default-features = false, features = ["derive", "alloc"] }

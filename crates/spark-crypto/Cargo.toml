@@ -21,7 +21,11 @@ zeroize = { version = "1", default-features = false, features = ["alloc", "deriv
 subtle = { version = "2", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hmac = { version = "0.12", default-features = false }
+blind-rsa-signatures = "0.17"
 serde = { version = "1", default-features = false, optional = true }
+
+[dev-dependencies]
+blind-rsa-signatures = "0.17"
 
 [features]
 # Serialization of `Secret` is opt-in and used in exactly one place: encoding the

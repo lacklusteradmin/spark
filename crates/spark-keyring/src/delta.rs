@@ -20,10 +20,30 @@ pub enum Delta {
     UpsertRoom(Room),
     /// Leave a room. Its chunks are handled separately; this only forgets the key.
     ForgetRoom(RoomId),
+    /// Start a new generation, because membership changed.
+    ///
+    /// Kept as its own delta rather than folded into `UpsertRoom`: losing a past
+    /// generation loses that stretch of history permanently, so adding one must
+    /// never be able to overwrite the ones before it.
+    OpenGeneration {
+        /// Which room.
+        room: RoomId,
+        /// The generation.
+        generation: crate::Generation,
+    },
+    /// Record the serialized MLS group state.
+    SetMlsState {
+        /// Which room.
+        room: RoomId,
+        /// Opaque bytes; this crate does not interpret MLS.
+        state: Vec<u8>,
+    },
     /// Record that a lane has advanced.
     AdvanceHead {
         /// Which room.
         room: RoomId,
+        /// Which generation.
+        epoch: u64,
         /// Which lane.
         lane: SerLane,
         /// The new head. Applied as a maximum, never as an assignment, so an
@@ -78,15 +98,37 @@ impl Delta {
                 k.rooms.push(r.clone());
             }
             Delta::ForgetRoom(id) => k.rooms.retain(|r| r.id != *id),
-            Delta::AdvanceHead { room, lane, seq } => {
+            Delta::OpenGeneration { room, generation } => {
                 if let Some(r) = k.rooms.iter_mut().find(|r| r.id == *room) {
-                    match r.heads.iter_mut().find(|(l, _)| l == lane) {
+                    // Idempotent, and never destructive: a replayed delta must not
+                    // drop the generation already recorded for that epoch.
+                    if !r.generations.iter().any(|g| g.epoch == generation.epoch) {
+                        r.generations.push(generation.clone());
+                        r.generations.sort_by_key(|g| g.epoch);
+                    }
+                }
+            }
+            Delta::SetMlsState { room, state } => {
+                if let Some(r) = k.rooms.iter_mut().find(|r| r.id == *room) {
+                    r.mls_state = Some(state.clone());
+                }
+            }
+            Delta::AdvanceHead {
+                room,
+                epoch,
+                lane,
+                seq,
+            } => {
+                if let Some(r) = k.rooms.iter_mut().find(|r| r.id == *room)
+                    && let Some(g) = r.generations.iter_mut().find(|g| g.epoch == *epoch)
+                {
+                    match g.heads.iter_mut().find(|(l, _)| l == lane) {
                         // A maximum, not an assignment: deltas can arrive twice
                         // and out of order, and history must not rewind.
                         Some((_, s)) => *s = (*s).max(*seq),
-                        None => r.heads.push((*lane, *seq)),
+                        None => g.heads.push((*lane, *seq)),
                     }
-                    r.heads.sort_by_key(|(l, _)| *l);
+                    g.heads.sort_by_key(|(l, _)| *l);
                 }
             }
             Delta::AddUpload(u) => {

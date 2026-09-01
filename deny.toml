@@ -54,7 +54,31 @@ confidence-threshold = 0.93
 yanked = "deny"
 
 # Ignored by ID, never by category: a new advisory on anything still fails here.
+#
+# One of these is a real vulnerability rather than a maintenance notice. It is
+# recorded in README.md under "Blocking before launch" as well, because an entry
+# in this file is not where a shipping decision should live.
 ignore = [
+  { id = "RUSTSEC-2023-0071", reason = """
+THE MARVIN ATTACK. A real vulnerability, not an unmaintained notice, and the only
+one on this list.
+
+`rsa` is not constant-time, so an attacker who can time private-key operations
+over the network may recover the key. Spark performs exactly that operation on a
+server: the keyring service signs blinded storage tokens. Recovering the issuer
+key means minting unlimited tokens, which removes the economic floor D1 exists to
+provide — the one defence against mass account creation that Spark has.
+
+It reaches us through blind-rsa-signatures -> rsa. No patch exists; upstream work
+on a constant-time implementation is in progress.
+
+This is ignored to unblock development, NOT accepted for launch. Build-notes §1
+says escalate rather than improvise, so it is escalated: see README.md. Before any
+public deployment this needs one of — upstream landing constant-time RSA, moving
+the issuer to a different blind-signature construction, or the signing operation
+being placed somewhere an attacker cannot time it. Deleting this entry without
+doing one of those is the mistake it exists to prevent.
+""" },
   { id = "RUSTSEC-2026-0173", reason = """
 proc-macro-error2 is unmaintained. Not a vulnerability — an unmaintained notice.
 

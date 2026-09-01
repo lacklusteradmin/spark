@@ -33,9 +33,14 @@ use openmls::prelude::tls_codec::Serialize as TlsSerialize;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::OpenMlsProvider;
-/// A room's long-lived secret. Structurally identical to `spark_chunk::RoomRoot`;
-/// they are not shared as a type because spark-chunk sits at the same layer.
+/// One generation of a room's archive secret.
+///
+/// Structurally identical to `spark_chunk::RoomRoot`; not shared as a type
+/// because spark-chunk sits at the same layer.
 pub type RoomRoot = spark_crypto::Secret<32>;
+
+/// MLS exporter label for the archive secret.
+pub const ROOT_LABEL: &str = "spark/v1/room-root";
 use spark_crypto::VerifyingKey;
 use spark_identity::Identity;
 
@@ -91,7 +96,6 @@ pub fn key_package<P: OpenMlsProvider>(
 /// A room: one MLS group, one owner set, one room root.
 pub struct Room {
     group: MlsGroup,
-    root: RoomRoot,
 }
 
 /// What an operation produced, ready for the commit lane.
@@ -123,7 +127,6 @@ impl Room {
         provider: &P,
         me: &VerifyingKey,
         signer: &Signer,
-        root: RoomRoot,
     ) -> Result<Self, RoomError> {
         let group = MlsGroup::builder()
             .ciphersuite(CIPHERSUITE)
@@ -132,22 +135,18 @@ impl Room {
             .with_group_context_extensions(OwnerSet::founder(me).extensions())
             .build(provider, signer, credential(me, signer))
             .map_err(|_| RoomError::Mls)?;
-        Ok(Self { group, root })
+        Ok(Self { group })
     }
 
     /// Join from a welcome.
     ///
-    /// **The room root is supplied by the caller, not carried in the welcome.**
-    /// MLS forward secrecy means a joiner cannot decrypt pre-join messages on its
-    /// own, so an existing member re-shares the historical key out of band. That
-    /// is the mechanism `Spark-spec.md` F4 flags as sitting outside MLS's
-    /// guarantees, and it is deliberately confined to this one value and this one
-    /// function signature, where it is visible.
-    pub fn join<P: OpenMlsProvider>(
-        provider: &P,
-        welcome: &[u8],
-        root: RoomRoot,
-    ) -> Result<Self, RoomError> {
+    /// The joiner can derive the *current* generation's root immediately, because
+    /// it comes from the MLS exporter and they are now in the group. Earlier
+    /// generations they cannot derive at all — that is MLS forward secrecy — so an
+    /// existing member re-shares the past roots out of band. That re-share is the
+    /// mechanism `Spark-spec.md` F4 flags as sitting outside MLS's guarantees, and
+    /// it is now exactly one list of 32-byte values.
+    pub fn join<P: OpenMlsProvider>(provider: &P, welcome: &[u8]) -> Result<Self, RoomError> {
         let msg = MlsMessageIn::tls_deserialize_exact_bytes(welcome).map_err(|_| RoomError::Mls)?;
         let w = match msg.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
@@ -161,12 +160,32 @@ impl Room {
             .into_group(provider)
             .map_err(|_| RoomError::Mls)?;
         OwnerSet::from_group(&group)?;
-        Ok(Self { group, root })
+        Ok(Self { group })
     }
 
-    /// The room's long-lived secret, from which every chunk name and key derives.
-    pub fn root(&self) -> &RoomRoot {
-        &self.root
+    /// The archive secret for the room's **current** generation.
+    ///
+    /// Derived from the MLS exporter, so it changes at every epoch — and every
+    /// membership change is a commit, which is an epoch. That is what makes
+    /// removal actually remove read access: a member who never reaches epoch n+1
+    /// cannot derive generation n+1's root, so the names of chunks written after
+    /// they left are not merely unreadable to them but uncomputable.
+    ///
+    /// It also removes a distribution problem. A randomly generated root would
+    /// have to be sent to every member and re-sent on every rotation; an exporter
+    /// secret is derived independently by everyone who is in the group.
+    pub fn root<P: OpenMlsProvider>(&self, provider: &P) -> Result<RoomRoot, RoomError> {
+        let b = self
+            .group
+            .export_secret(provider.crypto(), ROOT_LABEL, &[], 32)
+            .map_err(|_| RoomError::Mls)?;
+        let a: [u8; 32] = b.as_slice().try_into().map_err(|_| RoomError::Mls)?;
+        Ok(spark_crypto::Secret::new(a))
+    }
+
+    /// The generation number, which is the MLS epoch.
+    pub fn generation(&self) -> u64 {
+        self.group.epoch().as_u64()
     }
 
     /// The current owner set, read from the group context.
@@ -384,11 +403,11 @@ impl Room {
 
     /// Dissolve the room. The last owner only.
     ///
-    /// Returns the room root so the caller can derive every chunk name and have
-    /// the store delete them (`Spark-spec.md` F7: room chunks are freed by
-    /// deletion, media by receipt count). **Shared media is not freed** — each
-    /// uploader reclaims their own space from their upload list, and the client
-    /// must say so, because users will assume dissolving cleans up.
+    /// The caller derives every chunk name from the generation roots it holds in
+    /// its keyring and has the store delete them (`Spark-spec.md` F7: room chunks
+    /// are freed by deletion, media by receipt count). **Shared media is not
+    /// freed** — each uploader reclaims their own space from their upload list,
+    /// and the client must say so, because users will assume dissolving cleans up.
     pub fn dissolve(self) -> Result<Dissolution, RoomError> {
         let owners = OwnerSet::from_group(&self.group)?;
         let b: [u8; 32] = self
@@ -406,7 +425,9 @@ impl Room {
         if owners.len() != 1 {
             return Err(RoomError::OtherOwnersRemain);
         }
-        Ok(Dissolution { root: self.root })
+        Ok(Dissolution {
+            generations: self.group.epoch().as_u64() + 1,
+        })
     }
 
     /// Send an application message.
@@ -470,8 +491,9 @@ impl core::fmt::Debug for Commit {
 
 /// What a dissolve yields.
 pub struct Dissolution {
-    /// The room root, for deriving every chunk name to delete.
-    pub root: RoomRoot,
+    /// How many generations the room had. The caller holds their roots and
+    /// derives the names to delete.
+    pub generations: u64,
 }
 
 /// Serialize an MLS message for the commit lane.
@@ -481,7 +503,7 @@ pub struct Dissolution {
 /// satisfy a bound that looks identical.
 impl core::fmt::Debug for Dissolution {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Dissolution(root redacted)")
+        write!(f, "Dissolution({} generations)", self.generations)
     }
 }
 

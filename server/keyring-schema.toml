@@ -13,5 +13,8 @@ fields = ["addr", "quota_media_used", "quota_text_used", "quota_limit"]
 name = "rate"
 fields = ["addr", "rate_window_start", "rate_count"]
 [[table]]
+name = "request"
+fields = ["addr", "request_index", "request_bytes", "mtime"]
+[[table]]
 name = "refund_spent"
 fields = ["spent_refund_voucher"]

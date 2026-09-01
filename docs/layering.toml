@@ -52,8 +52,11 @@ role  = "the outer envelope layer: room roots, receipts, upload list, tokens, na
 name  = "spark-sync"
 layer = 3
 zone  = "pure"
-deps  = ["spark-chunk", "spark-keyring", "spark-mls"]
-role  = "lane merge, vector clocks, total order, conflict resolution, offline queue"
+# Deliberately not spark-mls. Ordering and addressing do not need to understand
+# what a payload is; interpreting one needs a provider, which is the client's job.
+# Keeping payloads opaque here is what lets the total order be a pure function.
+deps  = ["spark-crypto", "spark-chunk", "spark-keyring"]
+role  = "lane merge, vector clocks, the total order every client must agree on, and the outbox that enforces reserve-before-seal"
 
 # ---- I/O line ----
 # Everything above this point is `pure`. spark-transport is the only crate below
@@ -64,7 +67,7 @@ name  = "spark-transport"
 layer = 4
 zone  = "io"
 deps  = ["spark-chunk"]
-role  = "WebSocket/TLS, SOCKS5 per traffic class, Hysteria scheduler. The only I/O below the client."
+role  = "the only crate below spark-client allowed to touch the network. Traffic-class routing (D2), SOCKS5 with per-circuit stream isolation, and a ledger of every connection opened — which is how gate 9 is checkable at all. WebSocket framing and TLS land with the client stage; Hysteria attaches at Transport::open."
 
 [[crate]]
 name  = "spark-tokens"
@@ -116,8 +119,7 @@ role  = "trust domain 1: addr blobs, quota counters, token withdrawal. The only 
 name  = "spark-content-server"
 layer = 10
 zone  = "io"
-# spark-crypto is a dev-dependency: the rule tests need Secret to build room roots
-# and chunk keys. Declared rather than exempted — a test-only edge is still an edge.
+# spark-crypto for verifying blind tokens, and for the rule tests' Secret.
 deps  = ["spark-crypto", "spark-chunk", "spark-store"]
 role  = "trust domain 2: account-free chunk store, write-once, receipts. Writes carry a blind token; reads carry nothing at all"
 
@@ -136,16 +138,31 @@ banned_in_pure = [
   "openssl", "tokio-socks", "axum", "actix-web", "warp", "rusqlite", "sled",
   # Entropy is a parameter everywhere below the I/O line: Mnemonic::from_entropy
   # takes it, Chunk::seal takes a nonce, and spark-mls takes an OpenMlsProvider.
-  # A syscall entropy source arriving transitively would quietly undo all three,
-  # so `openmls_rust_crypto` stays a dev-dependency of spark-mls and a real one
-  # only in spark-client.
-  "getrandom", "rand", "rand_core", "openmls_rust_crypto", "openmls_memory_storage",
+  # `openmls_rust_crypto` stays a dev-dependency of spark-mls and a real one only
+  # in spark-client.
+  #
+  # `getrandom` and `rand_core` were on this list and have been removed, which is
+  # a deliberate trade rather than a relaxation. RFC 9474 blind signatures pull
+  # getrandom transitively through prime generation, so banning the crate would
+  # have forced the blind-signature *client math* — pure, and exactly the kind of
+  # thing that must be offline-testable — above the I/O line to satisfy a rule
+  # aimed at something else. What the rule is actually for is entropy being drawn
+  # rather than passed, and that is a property of the source, not the manifest. It
+  # now lives in `pure_source.banned_paths` below, where it catches the mistake
+  # itself instead of a crate that makes the mistake possible.
+  "rand", "openmls_rust_crypto", "openmls_memory_storage",
 ]
 
 # Source-level bans inside `pure` crates. Cargo.toml alone cannot catch these:
 # std is always available.
 [pure_source]
-banned_paths = ["std::net", "std::fs", "std::time::SystemTime", "std::time::Instant", "std::process"]
+banned_paths = [
+  "std::net", "std::fs", "std::time::SystemTime", "std::time::Instant", "std::process",
+  # Entropy must arrive as a parameter, never be drawn. These are the ways a pure
+  # crate would draw it, and naming them is what the removal of `getrandom` from
+  # banned_in_pure above is traded against.
+  "OsRng", "thread_rng", "rand::random", "from_entropy()", "getrandom::",
+]
 
 # Crates in `boundary` must not touch cryptography. If a key is handled above the
 # FFI line, reproducible builds stop bounding what an auditor has to read.

@@ -93,8 +93,8 @@ fn the_header_leaks_only_kind_and_nonce() {
 #[test]
 fn identical_files_produce_one_identical_chunk() {
     // The whole basis of "a photo twenty people sent costs one copy".
-    let (n1, k1, c1) = media::seal(b"a shared photo");
-    let (n2, k2, c2) = media::seal(b"a shared photo");
+    let (n1, k1, c1) = media::seal_raw(b"a shared photo");
+    let (n2, k2, c2) = media::seal_raw(b"a shared photo");
     assert_eq!(n1, n2);
     assert_eq!(
         c1.as_bytes(),
@@ -106,8 +106,8 @@ fn identical_files_produce_one_identical_chunk() {
 
 #[test]
 fn different_files_do_not_collide() {
-    let (a, _, _) = media::seal(b"one file");
-    let (b, _, _) = media::seal(b"another file");
+    let (a, _, _) = media::seal_raw(b"one file");
+    let (b, _, _) = media::seal_raw(b"another file");
     assert_ne!(a, b);
 }
 
@@ -115,7 +115,7 @@ fn different_files_do_not_collide() {
 fn the_store_can_verify_a_media_name_without_any_key() {
     // Hashing the finished chunk rather than the plaintext is what closes name
     // squatting: nobody can claim a name they cannot produce bytes for.
-    let (name, _, chunk) = media::seal(b"contents");
+    let (name, _, chunk) = media::seal_raw(b"contents");
     assert_eq!(media::name_of(&chunk), name);
 
     let impostor = Chunk::seal(Kind::Media, &key(9), &[9; 24], b"different contents");
@@ -128,7 +128,7 @@ fn the_store_can_verify_a_media_name_without_any_key() {
 
 #[test]
 fn a_media_chunk_is_inert_without_its_key() {
-    let (_, k, c) = media::seal(b"contents");
+    let (_, k, c) = media::seal_raw(b"contents");
     assert!(media::open(&c, &k).is_ok());
     assert_eq!(
         media::open(&c, &key(0)).err(),
@@ -139,8 +139,8 @@ fn a_media_chunk_is_inert_without_its_key() {
 #[test]
 fn the_capability_is_recoverable_from_the_file() {
     // Re-sharing a file into another room must not need a re-upload.
-    let (name, key1, _) = media::seal(b"contents");
-    let (name2, key2) = media::capability(b"contents");
+    let (name, key1, _) = media::seal_raw(b"contents");
+    let (name2, key2) = media::capability_raw(b"contents");
     assert_eq!(name, name2);
     assert_eq!(key1.expose(), key2.expose());
 }

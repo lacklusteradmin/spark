@@ -14,19 +14,40 @@ pub struct RoomId(pub [u8; 16]);
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Receipt(pub [u8; 32]);
 
+/// One generation of a room's archive.
+///
+/// The archive secret is the MLS exporter secret for an epoch, so it rotates on
+/// every membership change. That is what makes removal remove read access: a
+/// member who never reaches the next epoch cannot derive the next generation's
+/// root, so later chunk names are not merely unreadable to them but uncomputable.
+///
+/// Every past generation must be kept. They cannot be re-derived after the fact —
+/// that is MLS forward secrecy — so losing one loses that stretch of history
+/// permanently, for its owner as much as for anyone else.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Generation {
+    /// The MLS epoch this generation corresponds to.
+    pub epoch: u64,
+    /// The archive secret every chunk name and key in this generation derives from.
+    pub root: RoomRoot,
+    /// The highest sequence seen in each lane, as `(lane, seq)` sorted by lane.
+    pub heads: Vec<(SerLane, u64)>,
+}
+
 /// One room, as this account knows it.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Room {
     /// Local identifier.
     pub id: RoomId,
-    /// The long-lived room secret every chunk name and key derives from.
-    pub root: RoomRoot,
+    /// Every generation, oldest first. Reading history means walking all of them.
+    pub generations: Vec<Generation>,
+    /// The serialized MLS group state, so a restored client can rejoin the live
+    /// conversation rather than only read the archive.
+    pub mls_state: Option<Vec<u8>>,
     /// What the user calls this room. Local only.
     pub display_name: String,
     /// This account's own message lane.
     pub my_lane: SerLane,
-    /// The highest sequence seen in each lane, as `(lane, seq)` sorted by lane.
-    pub heads: Vec<(SerLane, u64)>,
 }
 
 /// A [`LaneId`] in a form serde can carry.

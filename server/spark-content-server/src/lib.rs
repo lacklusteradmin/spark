@@ -23,6 +23,7 @@
 #![deny(missing_docs)]
 
 use spark_chunk::{Chunk, Kind, media};
+use spark_crypto::{IssuerPublic, Token, TokenClaim};
 use spark_store::{Cell, Db};
 
 /// Table of stored chunks, keyed by chunk name.
@@ -35,14 +36,17 @@ pub const T_TOKEN: &str = "token_spent";
 /// A request to the content service.
 #[derive(Clone, Debug)]
 pub enum Request {
-    /// Store a chunk. Carries a blind token serial and nothing else.
+    /// Store a chunk, authorised by a blind token and nothing else.
     Put {
         /// The claimed name.
         name: [u8; 32],
         /// The sealed chunk.
         chunk: Vec<u8>,
-        /// A blind token serial, spendable once.
-        token: Vec<u8>,
+        /// What the token authorises: a serial the client chose and a size class.
+        claim: TokenClaim,
+        /// The issuer's signature over that claim. This service verifies it and
+        /// learns nothing else — not who drew the token, not when, not for what.
+        token: Token,
     },
     /// Fetch a chunk. Unauthenticated by design.
     Get {
@@ -105,6 +109,10 @@ pub enum Refusal {
     Malformed,
     /// That token serial has already been spent.
     TokenSpent,
+    /// The token does not verify under the issuer's key.
+    BadToken,
+    /// The chunk is larger than the token's size class allows.
+    TooLarge,
     /// No such name.
     NotFound,
     /// The receipt does not match any outstanding holder of that chunk.
@@ -117,6 +125,7 @@ pub enum Refusal {
 #[derive(Clone)]
 pub struct Content {
     db: Db,
+    issuer: IssuerPublic,
     /// Supplies receipts and voucher blinding. A parameter, not a syscall — the
     /// same discipline as everywhere below the I/O line, and it keeps this
     /// service's tests deterministic.
@@ -129,9 +138,14 @@ fn hex(b: &[u8]) -> String {
 
 impl Content {
     /// A service over `db`.
-    pub fn new(db: Db) -> Self {
+    /// A service over `db`, verifying tokens against the issuer's public key.
+    ///
+    /// Only the public half. This service cannot mint a token, and therefore
+    /// cannot forge the evidence that someone paid for an upload.
+    pub fn new(db: Db, issuer: IssuerPublic) -> Self {
         Self {
             db,
+            issuer,
             counter: Default::default(),
         }
     }
@@ -156,7 +170,12 @@ impl Content {
     /// Handle one request.
     pub fn handle(&self, req: Request) -> Response {
         match req {
-            Request::Put { name, chunk, token } => self.put(name, chunk, token),
+            Request::Put {
+                name,
+                chunk,
+                claim,
+                token,
+            } => self.put(name, chunk, claim, token),
             Request::Get { name } => match self.db.field(T_CHUNK, &hex(&name), "chunk_bytes") {
                 Some(Cell::Bytes(b)) => Response::Chunk(b),
                 _ => Response::Refused(Refusal::NotFound),
@@ -167,15 +186,26 @@ impl Content {
         }
     }
 
-    fn put(&self, name: [u8; 32], bytes: Vec<u8>, token: Vec<u8>) -> Response {
-        let serial = hex(&token);
-        // Spend the token first, and spend it whatever happens next. Refunding it
-        // on a duplicate would be exactly the discount that lets a caller probe
-        // what the store holds.
+    fn put(&self, name: [u8; 32], bytes: Vec<u8>, claim: TokenClaim, token: Token) -> Response {
+        // Verify before spending: an unsigned serial must not be able to burn a
+        // slot in the spent list, or anyone could lock out a token they guessed.
+        if self.issuer.verify(&token, &claim.encode()).is_err() {
+            return Response::Refused(Refusal::BadToken);
+        }
+        if bytes.len() as u64 > claim.max_bytes() {
+            return Response::Refused(Refusal::TooLarge);
+        }
+
+        // The serial is the only thing recorded, and the client chose it. It says
+        // nothing about who drew the token, which is the entire point of signing
+        // it blind.
+        let serial = hex(&claim.serial);
+        // Spend it whatever happens next. Refunding on a duplicate would be
+        // exactly the discount that lets a caller probe what the store holds.
         if !self.db.put_if_absent(
             T_TOKEN,
             &serial,
-            vec![("spent_token_serial", Cell::Bytes(token))],
+            vec![("spent_token_serial", Cell::Bytes(claim.serial.to_vec()))],
         ) {
             return Response::Refused(Refusal::TokenSpent);
         }

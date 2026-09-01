@@ -45,20 +45,16 @@ fn derive_sign_secret(entropy: u8) -> Secret<32> {
     spark_crypto::expand::<32>(&root, spark_identity::INFO_SIGN)
 }
 
-fn root(b: u8) -> RoomRoot {
-    Secret::new([b; 32])
-}
-
 /// Create a room and add `guest`, returning both sides.
 fn room_of_two(host: &Client, guest: &Client) -> (Room, Room) {
-    let mut a = Room::create(&host.provider, &host.key(), &host.signer, root(1)).unwrap();
+    let mut a = Room::create(&host.provider, &host.key(), &host.signer).unwrap();
     let kp = key_package(&guest.provider, &guest.key(), &guest.signer).unwrap();
     let c = a
         .add_member(&host.provider, &host.signer, kp.key_package())
         .unwrap();
-    // The room root travels out of band: MLS forward secrecy means a joiner
-    // cannot decrypt pre-join history on its own (F4).
-    let b = Room::join(&guest.provider, &c.welcome.unwrap(), root(1)).unwrap();
+    // No root is passed: both sides derive the current generation from the MLS
+    // exporter. Only *past* generations need the out-of-band re-share (F4).
+    let b = Room::join(&guest.provider, &c.welcome.unwrap()).unwrap();
     (a, b)
 }
 
@@ -148,10 +144,10 @@ fn the_last_owner_cannot_leave_and_must_dissolve() {
         RoomError::LastOwner
     );
 
-    // Dissolving is the way out, and it hands back the root so the client can
-    // derive every chunk name to delete.
+    // Dissolving is the way out, and it reports how many generations of chunk
+    // names the client must derive and delete.
     let d = a.dissolve().unwrap();
-    assert_eq!(d.root.expose(), root(1).expose());
+    assert!(d.generations >= 1);
 }
 
 #[test]
@@ -311,4 +307,69 @@ fn the_owner_set_encoding_is_canonical() {
     // Idempotent in both directions.
     assert_eq!(a.with(&k1), a);
     assert_eq!(a.without(&k1).without(&k1), a.without(&k1));
+}
+
+#[test]
+fn every_member_derives_the_same_root_without_it_being_sent() {
+    // A randomly generated root would have to be distributed and re-distributed.
+    // An exporter secret is derived independently by everyone in the group.
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (a, b) = room_of_two(&alice, &bob);
+    assert_eq!(
+        a.root(&alice.provider).unwrap().expose(),
+        b.root(&bob.provider).unwrap().expose(),
+        "two members derived different archive roots"
+    );
+}
+
+#[test]
+fn a_removed_member_cannot_derive_the_next_generations_root() {
+    // Gate 7's third clause, and the reason the root is an exporter secret rather
+    // than a value fixed at creation. Since stage 6 the archive is sealed under
+    // the room root, so a root that never rotated would leave a removed member
+    // able to *compute the names of* and decrypt everything written afterwards —
+    // removal that removes nothing.
+    let (alice, bob) = (Client::new(1), Client::new(2));
+    let (mut a, mut b) = room_of_two(&alice, &bob);
+
+    let shared_before = a.root(&alice.provider).unwrap();
+    assert_eq!(
+        b.root(&bob.provider).unwrap().expose(),
+        shared_before.expose()
+    );
+
+    let c = a
+        .remove_member(&alice.provider, &alice.signer, &bob.key())
+        .unwrap();
+    b.process(&bob.provider, &c.commit).unwrap();
+
+    let after = a.root(&alice.provider).unwrap();
+    assert_ne!(
+        after.expose(),
+        shared_before.expose(),
+        "the root did not rotate on removal"
+    );
+
+    // Whatever Bob's copy of the group now derives, it is not the room's root.
+    let bobs_view = b.root(&bob.provider).map(|r| *r.expose());
+    assert_ne!(
+        bobs_view.ok(),
+        Some(*after.expose()),
+        "a removed member still derives the current root"
+    );
+}
+
+#[test]
+fn the_root_rotates_on_every_membership_change() {
+    let (alice, bob, carol) = (Client::new(1), Client::new(2), Client::new(3));
+    let (mut a, _b) = room_of_two(&alice, &bob);
+
+    let g1 = *a.root(&alice.provider).unwrap().expose();
+    let kp = key_package(&carol.provider, &carol.key(), &carol.signer).unwrap();
+    a.add_member(&alice.provider, &alice.signer, kp.key_package())
+        .unwrap();
+    let g2 = *a.root(&alice.provider).unwrap().expose();
+
+    assert_ne!(g1, g2, "adding a member did not start a new generation");
+    assert!(a.generation() >= 2, "generation did not advance");
 }

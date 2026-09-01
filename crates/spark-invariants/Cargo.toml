@@ -19,7 +19,12 @@ spark-crypto.workspace = true
 spark-identity.workspace = true
 spark-chunk.workspace = true
 spark-keyring.workspace = true
+spark-mls.workspace = true
+spark-sync.workspace = true
+spark-tokens.workspace = true
 spark-store.workspace = true
 spark-keyring-server = { path = "../../server/spark-keyring-server" }
 spark-content-server = { path = "../../server/spark-content-server" }
 spark-issuer = { path = "../../server/spark-issuer" }
+openmls_rust_crypto = "0.6"
+openmls_traits = "0.6"

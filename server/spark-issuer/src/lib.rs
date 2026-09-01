@@ -42,8 +42,12 @@ pub enum Request {
     Register {
         /// The exact name.
         name: String,
-        /// The key that will hold it.
-        key: [u8; 32],
+        /// The holder's **public identity**: signing key followed by KEM key.
+        ///
+        /// Both halves, because resolving a name has to yield enough to seal a
+        /// contact request to that person. The signing key alone would mean a
+        /// second lookup somewhere, and there is nowhere else to look.
+        key: [u8; 64],
         /// A blind payment voucher.
         voucher: Vec<u8>,
         /// Days since the epoch through which the name is paid.
@@ -53,8 +57,8 @@ pub enum Request {
     Transfer {
         /// The name.
         name: String,
-        /// The new holder.
-        new_key: [u8; 32],
+        /// The new holder's public identity.
+        new_key: [u8; 64],
         /// The current holder's signature over the transfer.
         sig: [u8; 64],
     },
@@ -70,11 +74,11 @@ pub enum Request {
 /// A response from the issuer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Response {
-    /// The key holding a name, or nothing.
+    /// The public identity holding a name, or nothing.
     ///
     /// A miss and a hit are the same shape and the same cost: anything that made
     /// them distinguishable in timing would be a probe oracle.
-    Resolved(Option<[u8; 32]>),
+    Resolved(Option<[u8; 64]>),
     /// Registered.
     Registered,
     /// Transferred. The old key appears nowhere afterwards.
@@ -117,7 +121,7 @@ impl Issuer {
         &self.db
     }
 
-    fn key_of(&self, name: &str) -> Option<[u8; 32]> {
+    fn key_of(&self, name: &str) -> Option<[u8; 64]> {
         let c = self.db.field(T_NAME, name, "name_pubkey")?;
         c.bytes()?.try_into().ok()
     }
@@ -155,7 +159,10 @@ impl Issuer {
                 let Some(holder) = self.key_of(&name) else {
                     return Response::Refused(Refusal::Unknown);
                 };
-                let Ok(vk) = VerifyingKey::from_bytes(&holder) else {
+                // The signing half is the first 32 bytes; that is what signs a
+                // transfer.
+                let sign: [u8; 32] = holder[..32].try_into().expect("64 begins with 32");
+                let Ok(vk) = VerifyingKey::from_bytes(&sign) else {
                     return Response::Refused(Refusal::BadSignature);
                 };
                 let mut msg = TRANSFER_CONTEXT.to_vec();
@@ -195,7 +202,7 @@ impl Issuer {
         }
     }
 
-    fn write(&self, name: &str, key: [u8; 32], paid_until_day: u32) {
+    fn write(&self, name: &str, key: [u8; 64], paid_until_day: u32) {
         self.db.put(
             T_NAME,
             name,

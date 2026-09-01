@@ -27,9 +27,11 @@ pub mod lane;
 pub mod media;
 pub mod name;
 pub mod room;
+pub mod scrub;
 
 pub use chunk::{Chunk, ChunkError};
 pub use header::{HEADER_LEN, Header, HeaderError, Kind};
 pub use lane::{LANE_LEN, LaneId};
 pub use name::ChunkName;
 pub use room::{RoomRoot, Slot};
+pub use scrub::{Format, ScrubError, Scrubbed, scrub};

@@ -22,6 +22,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod reach;
+
 use spark_crypto::{
     KemPublic, KemSecret, Mnemonic, MnemonicError, Prk, Secret, Signature, SignatureError,
     SigningKey, VerifyingKey, expand, extract, sha256_parts,
@@ -46,6 +48,11 @@ pub const ADDR_PREFIX: &[u8] = b"spark/v1/keyring/addr";
 pub struct Addr([u8; 32]);
 
 impl Addr {
+    /// Wrap raw bytes, for an address that arrived over the wire.
+    pub fn from_bytes(b: [u8; 32]) -> Self {
+        Self(b)
+    }
+
     /// The raw 32 bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

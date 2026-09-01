@@ -30,7 +30,9 @@ pub mod delta;
 pub mod model;
 
 pub use delta::Delta;
-pub use model::{ChunkClass, HeldName, Receipt, Room, RoomId, SerLane, SerName, Upload};
+pub use model::{
+    ChunkClass, Generation, HeldName, Receipt, Room, RoomId, SerLane, SerName, Upload,
+};
 
 use serde::{Deserialize, Serialize};
 use spark_chunk::{Chunk, ChunkError, Kind, LaneId};
@@ -86,14 +88,22 @@ impl Keyring {
         self.rooms.iter().find(|r| r.id == id)
     }
 
-    /// The highest sequence seen in one lane of a room, if any.
+    /// The highest sequence seen in one lane of a room's newest generation.
     pub fn head(&self, id: RoomId, lane: LaneId) -> Option<u64> {
         let l = SerLane::from(lane);
-        self.room(id)?
-            .heads
+        let g = self.room(id)?.generations.last()?;
+        g.heads.iter().find(|(k, _)| *k == l).map(|(_, s)| *s)
+    }
+
+    /// The head in a specific generation.
+    pub fn head_in(&self, id: RoomId, epoch: u64, lane: LaneId) -> Option<u64> {
+        let l = SerLane::from(lane);
+        let g = self
+            .room(id)?
+            .generations
             .iter()
-            .find(|(k, _)| *k == l)
-            .map(|(_, s)| *s)
+            .find(|g| g.epoch == epoch)?;
+        g.heads.iter().find(|(k, _)| *k == l).map(|(_, s)| *s)
     }
 
     /// Total bytes this account currently holds, which is what quota measures.

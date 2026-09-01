@@ -27,6 +27,12 @@ fields = [
   "rate_window_start",
   "rate_count",
   "spent_refund_voucher",
+  # The contact-request tray. The service sees the *recipient* at write time,
+  # which is unavoidable — a request has to be delivered somewhere — and is
+  # listed as open question §9.5 in docs/protocol.md. It never sees the sender:
+  # the write carries a blind token, and the sender's identity is inside the AEAD.
+  "request_index",
+  "request_bytes",
 ]
 
 [content_service]

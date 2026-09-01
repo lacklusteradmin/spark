@@ -11,13 +11,13 @@ A private, phone-number-free messenger that does one thing: chat.
 
 ## Status
 
-**Stage 5 of 12** (`Spark-build-notes.md` §5): the servers. All five client
-`pure` crates and all three services are implemented. `spark-transport`,
-`spark-tokens`, `spark-sync`, `spark-client`, `spark-ffi` are still stubs.
+**Stage 9 of 12** (`Spark-build-notes.md` §5): Tor. Nine of eleven client crates
+and all three services are implemented. `spark-client` and `spark-ffi` are still
+stubs.
 
 ```bash
-cargo test --workspace             # 76 tests
-scripts/verify-reproducible.sh     # 130 artifacts byte-identical across two builds
+cargo test --workspace             # 138 tests
+scripts/verify-reproducible.sh     # 150 artifacts byte-identical across two builds
 ```
 
 **Gate 1** — invariant tests fail against a deliberately broken stub; two
@@ -62,6 +62,56 @@ whitelist, agreement with the hand-written `server/*-schema.toml`, and no
 plaintext or graph edge anywhere. Each was confirmed by deliberately breaking it
 first.
 
+**Gate 6 — the go/no-go.** Wipe the device, restore from seed, history matches;
+the server's entire database yields no plaintext and no graph edge. All of it
+holds, in `crates/spark-invariants/tests/gate6_recovery.rs`, which runs the whole
+stack: a real MLS room, real chunks, both real services, and then throws
+everything away except twenty-four words.
+
+**This gate changed the protocol.** See `docs/protocol.md` §5.0. The first version
+of that test passed while the total order was reversed, because it only compared
+two restores to each other rather than to what was actually said. Fixing the
+assertion surfaced the real problem: `Payload::Application` held an MLS ciphertext,
+and MLS deletes each sender-ratchet key as it is used. An archive of MLS
+ciphertexts is unreadable after a restore, by anyone, including its owner — which
+is the opposite of what F2 promises. The archive layer is now the room chunk's own
+AEAD, keyed from `room_root`, with attribution from a signature by the identity
+key that is also the MLS credential.
+
+**Gate 7** — the API cannot enumerate names or reach a stranger without
+acceptance; a rejected request leaves no trace for the sender; after migration the
+old key decrypts nothing new. All three hold, in
+`crates/spark-invariants/tests/gate7_reachability.rs`.
+
+**This gate found a hole stage 6 had opened.** Since the archive became
+`room_root`-sealed, a fixed root meant a removed member could still *compute the
+names of* and decrypt everything written after they left — removal that removed
+nothing. The root is now the MLS exporter secret for the epoch, so it rotates on
+every membership change, and a keyring holds one **generation** per epoch.
+Recovery walks all of them; a late joiner holds only the generations from after
+they arrived.
+
+**Gate 8** — two accounts uploading one file produce one chunk and two full
+charges; a viewer is charged nothing; a ten-member room stores one history;
+receipts restore from seed; dissolve deletes room chunks and spares shared media;
+the content store logs nothing about who; GPS EXIF cannot survive a send. All of
+it holds, in `crates/spark-invariants/tests/gate8_storage.rs`.
+
+**"The content store logs nothing about who" failed first, and it was right to.**
+The storage token had been a placeholder reading `token-{addr}-{n}` — it embedded
+the address, and the content store records spent serials. Tokens are now real RFC
+9474 blind RSA: the client blinds locally, the keyring service debits quota and
+signs bytes it cannot read, and the content service verifies a signature that
+tells it nothing about who drew it. The size class travels inside the signed
+message so the store can check an upload fits what was paid for without learning
+anything else.
+
+**Gate 9** — always-on mode shows zero direct connections; mixed mode shows them
+for media fetches only. Both hold, in `crates/spark-transport/tests/routing.rs`,
+checked against a ledger of what the transport *did* rather than against the
+routing table: a test that only asked `Mode::uses_tor` would pass while the code
+ignored it.
+
 ## The envelope
 
 ```text
@@ -85,6 +135,66 @@ The two naming schemes are deliberately different:
 | Deduplicates | server-wide | not at all |
 
 Files are hard to guess; sentences are not.
+
+## Generations
+
+The archive secret is the MLS exporter secret for an epoch, not a value fixed at
+room creation. Every membership change is a commit, and every commit is an epoch,
+so the root rotates whenever the member set changes. A removed member never
+reaches the next epoch, so later chunk names are not merely unreadable to them but
+uncomputable.
+
+It also removes a distribution problem: a random root would have to be sent to
+every member and re-sent on every rotation, while an exporter secret is derived
+independently by everyone in the group. What *cannot* be derived is a past
+generation — that is forward secrecy — so those are the "historical keys" F4 says
+an existing member re-shares, now reduced to one list of 32-byte values.
+
+Every past generation must be kept. Losing one loses that stretch of history
+permanently, for its owner as much as for anyone else.
+
+## Tor
+
+Traffic class is a required argument to `Transport::open`, never inferred. A
+request whose class nobody decided is a request routed by accident, and the
+accident is always the same one — media escaping in a mode the user believed
+covered it.
+
+Two details separate routing over Tor from appearing to:
+
+* **The hostname goes to the proxy as a name**, using RFC 1928's `ATYP=0x03`.
+  Resolving locally and sending an IP hands every lookup to the ISP's resolver,
+  and the traffic that followed was over Tor for nothing. This is the most common
+  way a Tor integration leaks, and it leaks silently.
+* **Every request gets its own circuit**, via SOCKS5 username/password credentials
+  that vary per request — Tor's `IsolateSOCKSAuth`. Sharing one circuit lets an
+  exit-side observer link requests to each other even without an IP. A proxy that
+  refuses username/password is refused in turn rather than falling back to
+  no-auth, which would mean sharing a circuit while the user was told otherwise.
+
+WebSocket framing and TLS are not here yet, and `docs/protocol.md` §6 specifies
+both. Gate 9 is about *where* connections go, which is decided before a byte of
+TLS is written.
+
+## Metadata stripping
+
+`scrub` returns an error for any format it cannot fully account for, and
+`Scrubbed` — the only thing `media::seal` accepts — has no other constructor.
+Sending an unscrubbable file is not something the API can express.
+
+The obvious alternative, stripping what is recognised and passing the rest
+through, ships GPS coordinates the first time someone sends a format it was not
+taught about, with nothing anywhere reporting a problem. Build-notes §1: never
+silently downgrade a privacy setting.
+
+Re-encoding would be more thorough and is rejected on cost: it means an image
+codec in the client, tens of thousands of lines of C-derived parsing on
+attacker-supplied input, which is a larger risk than the one it closes. This walks
+container structure only, never pixel data. PNG keeps an allow-list rather than
+dropping a deny-list, because private chunks are legal and can hold anything.
+
+A pleasant side effect: scrubbing before hashing means the same photograph from
+two different phones deduplicates, where the raw files would not have.
 
 ## Rooms
 
@@ -128,6 +238,23 @@ Rules that are easy to "improve" into a leak, so each has its own test in
 lane's arbitration point, and the backstop that makes derived room-chunk nonces
 safe); a duplicate upload is charged in full and answered identically to a fresh
 one; media is freed at zero holders while room chunks are deleted outright.
+
+## Blocking before launch
+
+**RUSTSEC-2023-0071 — the Marvin Attack.** The `rsa` crate is not constant-time,
+so an attacker who can time private-key operations over the network may recover
+the key. Spark does exactly that on a server: the keyring service blind-signs
+storage tokens. Recovering the issuer key means minting unlimited tokens, which
+removes the economic floor `Spark-spec.md` D1 depends on — the only defence Spark
+has against mass account creation.
+
+It arrives through `blind-rsa-signatures` -> `rsa`. No patch exists. It is ignored
+in `deny.toml` to unblock development and is **not accepted for launch**. Closing
+it needs one of:
+
+* upstream landing a constant-time RSA implementation;
+* moving the issuer to a different blind-signature construction;
+* placing the signing operation where an attacker cannot time it.
 
 ## Setup
 
