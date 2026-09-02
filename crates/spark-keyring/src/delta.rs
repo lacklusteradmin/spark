@@ -3,7 +3,7 @@
 //! An ordinary write appends one sealed delta rather than rewriting the whole
 //! keyring, which keeps a routine change small on a blob that only grows.
 
-use crate::model::{HeldName, Room, RoomId, SerLane, SerName, Upload};
+use crate::model::{HeldName, Room, RoomId, SerName, Upload};
 use crate::{Keyring, KeyringError};
 use serde::{Deserialize, Serialize};
 use spark_chunk::{Chunk, Kind};
@@ -31,23 +31,22 @@ pub enum Delta {
         /// The generation.
         generation: crate::Generation,
     },
-    /// Record the serialized MLS group state.
-    SetMlsState {
-        /// Which room.
-        room: RoomId,
-        /// Opaque bytes; this crate does not interpret MLS.
-        state: Vec<u8>,
-    },
-    /// Record that a lane has advanced.
-    AdvanceHead {
+    /// Record the MLS provider's serialized storage, for the whole account.
+    ///
+    /// Opaque bytes; this crate does not interpret MLS.
+    SetMlsState(Vec<u8>),
+    /// Claim the next slot in this account's own lane, before sealing anything
+    /// into it.
+    ///
+    /// Separate from `AdvanceHead` because they are different cursors: this one
+    /// says "I am about to write here", the other says "I have read this far".
+    ReserveSlot {
         /// Which room.
         room: RoomId,
         /// Which generation.
         epoch: u64,
-        /// Which lane.
-        lane: SerLane,
-        /// The new head. Applied as a maximum, never as an assignment, so an
-        /// out-of-order delta cannot rewind history.
+        /// The slot being claimed. Applied as a maximum, so a replayed delta
+        /// cannot hand the slot back out.
         seq: u64,
     },
     /// Record an upload and the receipt that releases it.
@@ -108,29 +107,16 @@ impl Delta {
                     }
                 }
             }
-            Delta::SetMlsState { room, state } => {
-                if let Some(r) = k.rooms.iter_mut().find(|r| r.id == *room) {
-                    r.mls_state = Some(state.clone());
-                }
-            }
-            Delta::AdvanceHead {
-                room,
-                epoch,
-                lane,
-                seq,
-            } => {
+            Delta::ReserveSlot { room, epoch, seq } => {
                 if let Some(r) = k.rooms.iter_mut().find(|r| r.id == *room)
                     && let Some(g) = r.generations.iter_mut().find(|g| g.epoch == *epoch)
                 {
-                    match g.heads.iter_mut().find(|(l, _)| l == lane) {
-                        // A maximum, not an assignment: deltas can arrive twice
-                        // and out of order, and history must not rewind.
-                        Some((_, s)) => *s = (*s).max(*seq),
-                        None => g.heads.push((*lane, *seq)),
-                    }
-                    g.heads.sort_by_key(|(l, _)| *l);
+                    // A maximum: a replayed delta must not hand a claimed slot
+                    // back out, which would be a reused nonce.
+                    g.my_next = g.my_next.max(*seq + 1);
                 }
             }
+            Delta::SetMlsState(state) => k.mls_state = Some(state.clone()),
             Delta::AddUpload(u) => {
                 k.uploads.retain(|x| x.name != u.name);
                 k.uploads.push(u.clone());

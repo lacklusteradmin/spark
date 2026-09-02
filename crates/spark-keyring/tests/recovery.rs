@@ -102,19 +102,18 @@ fn phase_one() -> (Servers, Addr) {
         generations: vec![Generation {
             epoch: 0,
             root,
-            heads: vec![],
+            my_next: 0,
         }],
-        mls_state: None,
+        mls_group_id: Vec::new(),
         display_name: "usual place".into(),
         my_lane: lane.into(),
     }));
     let snapshot = k.seal_snapshot(id.keyring_key(), &nonce(1));
 
     let deltas = vec![
-        Delta::AdvanceHead {
+        Delta::ReserveSlot {
             room: room_id,
             epoch: 0,
-            lane: lane.into(),
             seq: 2,
         }
         .seal(id.keyring_key(), &nonce(2)),
@@ -158,9 +157,9 @@ fn history_decrypts_from_the_seed_alone() {
     let r = k.rooms.first().expect("the room came back");
     assert_eq!(r.display_name, "usual place");
     assert_eq!(
-        k.head(r.id, r.my_lane.into()),
-        Some(2),
-        "lane head survived the deltas"
+        k.my_next(r.id, 0),
+        3,
+        "the write cursor survived the deltas"
     );
 
     // Names are recomputed from the recovered room root. The server was never
@@ -170,15 +169,9 @@ fn history_decrypts_from_the_seed_alone() {
     // Walk every generation, oldest first: the archive is only whole if all of
     // them came back, and a generation cannot be re-derived after the fact.
     for g in &r.generations {
-        let Some(head) = g
-            .heads
-            .iter()
-            .find(|(l, _)| *l == r.my_lane)
-            .map(|(_, s)| *s)
-        else {
-            continue;
-        };
-        for seq in 0..=head {
+        // Probe forward rather than resume from a cursor: a wiped device has no
+        // read cursor, and the keyring deliberately does not carry one.
+        for seq in 0..g.my_next {
             let slot = Slot::new(lane, seq);
             let chunk = servers
                 .get(room::name(&g.root, slot))
@@ -288,29 +281,27 @@ fn an_out_of_order_delta_cannot_rewind_a_lane() {
         generations: vec![Generation {
             epoch: 0,
             root: Secret::new([3; 32]),
-            heads: vec![],
+            my_next: 0,
         }],
-        mls_state: None,
+        mls_group_id: Vec::new(),
         display_name: "r".into(),
         my_lane: lane.into(),
     }));
 
-    k.apply(&Delta::AdvanceHead {
+    k.apply(&Delta::ReserveSlot {
         room: room_id,
         epoch: 0,
-        lane: lane.into(),
         seq: 9,
     });
-    k.apply(&Delta::AdvanceHead {
+    k.apply(&Delta::ReserveSlot {
         room: room_id,
         epoch: 0,
-        lane: lane.into(),
         seq: 4,
     });
     assert_eq!(
-        k.head(room_id, lane),
-        Some(9),
-        "a late delta rewound the head"
+        k.my_next(room_id, 0),
+        10,
+        "a late delta handed a claimed slot back out"
     );
 
     let _ = id;

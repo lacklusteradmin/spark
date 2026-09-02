@@ -1,0 +1,222 @@
+# The W1-W7 register from `Spark-spec.md`, "What Spark actually guarantees".
+#
+# Gate 12: "Every W1-W7 threat has an implemented mitigation or a documented
+# accepted risk." This file is that reckoning, and
+# crates/spark-invariants/tests/gate12_threats.rs is what stops it becoming a
+# document nobody checks: every `evidence` entry must name a test that exists,
+# and every threat must carry a `residual` saying what is left even after the
+# mitigation.
+#
+# status
+#   mitigated  code exists, a named test proves it, and `residual` says what the
+#              mitigation does not cover
+#   accepted   no mitigation is possible within the design; `residual` is the cost
+#              being accepted, and `stated_to_user` is where the user is told
+#
+# There is deliberately no `open` or `todo`. A threat with no answer fails the
+# gate, which is the point of having one.
+
+# ---------------------------------------------------------------------------
+
+[[threat]]
+id = "W1"
+title = "IP at delivery"
+severity = "severe"
+status = "mitigated"
+summary = """
+In the default mode media fetches still carry a real IP, and with Tor off the
+server sees it alongside hash(pubkey). IP leads to ISP, subscriber, and name.
+"""
+mitigation = """
+Per-traffic-class Tor routing (D2). Always-on routes everything; the default
+routes control and text over Tor and media direct. The hostname is sent to the
+proxy as a name so Tor resolves it, and every request gets its own circuit.
+"""
+evidence = [
+  "crates/spark-transport/tests/routing.rs::always_on_shows_zero_direct_connections",
+  "crates/spark-transport/tests/routing.rs::mixed_mode_shows_direct_connections_for_media_only",
+  "crates/spark-transport/tests/routing.rs::the_hostname_is_resolved_by_tor_not_locally",
+]
+residual = """
+The default mode still exposes an IP alongside content-derived media names, which
+links a network address to identifiable content. Always-on closes it and costs
+speed. Switching from off to on undoes nothing: the server already recorded the
+IP against the keyring label.
+"""
+stated_to_user = "crates/spark-transport/src/route.rs::Mode::describe"
+
+# ---------------------------------------------------------------------------
+
+[[threat]]
+id = "W2"
+title = "Push notifications"
+severity = "severe"
+status = "accepted"
+summary = """
+APNs and FCM tokens are bound to real Apple and Google accounts, bridging key to
+person and leaking timing.
+"""
+mitigation = """
+Partial, and only the client half. Push is its own switch, on by default with the
+leak stated; off means the platform is never asked for a token, rather than a
+token persisting while notifications are merely hidden. Wake-ups carry no payload.
+"""
+evidence = [
+  "crates/spark-transport/tests/push.rs::off_means_the_platform_is_never_asked_for_a_token",
+  "crates/spark-transport/tests/push.rs::the_wake_up_signal_carries_nothing",
+  "crates/spark-transport/tests/push.rs::push_is_on_by_default_and_is_its_own_switch",
+]
+residual = """
+Accepted, and larger than the client-side work suggests.
+
+Delivering a push at all requires something, somewhere, to hold a mapping from an
+account to an Apple or Google token. `Spark-build-notes.md` §2 says the servers
+may never store "real-world identifiers", and a push token is one. D3 says push is
+on by default. **Both cannot hold as absolutes**, and this register is where that
+is written down rather than discovered during implementation.
+
+No delivery service exists yet, and none should be built until this is resolved.
+The options are a fourth trust domain holding the mapping and nothing else, or
+push being opt-in rather than default, or no push. Whichever is chosen, the
+mapping is a real-world identifier held against an account, and W2 stays severe.
+
+Accounts with no token also form a visible group, which no mitigation removes.
+"""
+stated_to_user = "crates/spark-transport/src/push.rs::Setting::warning"
+
+# ---------------------------------------------------------------------------
+
+[[threat]]
+id = "W3"
+title = "Long-term linkability"
+severity = "structural"
+status = "accepted"
+summary = """
+The price of cloud recovery. Key and keyring are permanent, so one careless
+session without Tor retroactively deanonymizes the entire history.
+"""
+mitigation = """
+None is possible. Fixing this means abandoning recovery, which is the bet the
+whole design is built on.
+"""
+evidence = []
+residual = """
+Accepted in full. hash(pubkey) is stable for the life of an account by
+construction, because it is what recovery addresses. Key migration (F3) gives a
+user a new identifier, but does not undo the past: the old key still decrypts
+anything it held before leaving.
+"""
+stated_to_user = "Spark-ad.md, 'What Spark asks of you'"
+
+# ---------------------------------------------------------------------------
+
+[[threat]]
+id = "W4"
+title = "Traffic analysis"
+severity = "open"
+status = "mitigated"
+summary = """
+Keyring updates still correlate in time across accounts in one room.
+"""
+mitigation = """
+Two halves. The network-timing half is cover traffic (F12): a fixed schedule,
+uniform frame size, one endpoint, and no skipped slots. Delivery itself is
+polling a derived chunk name (decision D-A), so there is no fan-out writing to
+several mailboxes at one instant.
+"""
+evidence = [
+  "crates/spark-transport/tests/hysteria.rs::idle_and_busy_captures_are_indistinguishable",
+  "crates/spark-transport/tests/hysteria.rs::a_burst_does_not_change_the_schedule",
+  "crates/spark-invariants/tests/gate6_recovery.rs::the_servers_entire_database_yields_no_graph_edge",
+]
+residual = """
+Keyring-growth correlation remains open, as the spec says. Cover traffic hides
+network timing, not the fact that several keyrings grew at once. Cover traffic is
+also unavailable on iOS (see W2's platform note), so the mitigation does not reach
+every user.
+"""
+stated_to_user = "crates/spark-transport/src/hysteria.rs::Availability"
+
+# ---------------------------------------------------------------------------
+
+[[threat]]
+id = "W5"
+title = "The chosen Tor mode is itself a signal"
+severity = "structural"
+status = "accepted"
+summary = """
+Three modes split users into three groups rather than two, so each is smaller and
+membership more distinguishing.
+"""
+mitigation = """
+None. It is a direct consequence of D2's decision to offer a mixed mode, taken
+because bulk attachments over Tor are slow enough that many users would otherwise
+disable Tor entirely — a smaller anonymity set of people using Tor partly, versus
+a larger set using it not at all.
+"""
+evidence = [
+  "crates/spark-transport/tests/routing.rs::the_policy_is_exhaustive_and_the_default_is_mixed",
+]
+residual = """
+Accepted. The same reasoning applies to cover traffic and to push: each setting a
+user can change is a group they can be sorted into. D12 chose its parameters for
+adoption for exactly this reason.
+"""
+stated_to_user = "crates/spark-transport/src/route.rs::Mode::describe"
+
+# ---------------------------------------------------------------------------
+
+[[threat]]
+id = "W6"
+title = "EXIF"
+severity = "settled"
+status = "mitigated"
+summary = """
+Clients must strip all metadata before encryption.
+"""
+mitigation = """
+Structural. `media::seal` accepts only a `Scrubbed`, which has no constructor
+other than `scrub`, and `scrub` refuses any format it cannot fully account for
+rather than passing it through.
+"""
+evidence = [
+  "crates/spark-chunk/tests/scrub.rs::gps_exif_cannot_survive_a_jpeg_send",
+  "crates/spark-chunk/tests/scrub.rs::a_format_we_cannot_strip_is_refused_not_forwarded",
+  "crates/spark-chunk/tests/scrub.rs::sealing_media_is_only_reachable_through_the_scrubber",
+]
+residual = """
+Container metadata only. Steganography, a camera's sensor-noise fingerprint, and
+anything recoverable from the pixels themselves survive, because stripping those
+would mean re-encoding and an image codec in the client is a larger risk than the
+one it closes.
+"""
+stated_to_user = "crates/spark-chunk/src/scrub.rs::ScrubError::UnknownFormat"
+
+# ---------------------------------------------------------------------------
+
+[[threat]]
+id = "W7"
+title = "Links, names, and out-of-band invites"
+severity = "user"
+status = "accepted"
+summary = """
+Each can bind a key to a real name outside Spark's control.
+"""
+mitigation = """
+Bounded rather than removed. Pasted URLs stay inert text: no fetcher, no parser,
+no preview (D7), enforced by a dependency ban rather than by convention. Names are
+optional and resolve exactly, never by prefix. An invite carries a secret, so
+holding an address is not enough to reach someone.
+"""
+evidence = [
+  "crates/spark-invariants/tests/gate7_reachability.rs::the_issuer_answers_exact_names_and_nothing_else",
+  "crates/spark-invariants/tests/gate7_reachability.rs::an_invite_proves_it_was_handed_out",
+]
+residual = """
+Accepted, and the user's responsibility by construction. A link from a real-name
+account bridges a key to an identity, and Spark cannot see it happen. Buying a
+name is a durable public mapping from that name to a key; anyone who reuses a
+handle from elsewhere links the two themselves. Out-of-band invites travel through
+a channel Spark does not protect.
+"""
+stated_to_user = "Spark-ad.md, 'What Spark asks of you'"

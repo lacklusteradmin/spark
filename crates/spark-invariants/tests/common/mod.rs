@@ -52,3 +52,39 @@ pub fn token(serial: u8, bytes: u64) -> (spark_crypto::TokenClaim, spark_crypto:
         pk.finalize(b, &sig, &claim.encode()).expect("finalize"),
     )
 }
+
+/// An issuer service with its own voucher-signing key.
+pub fn name_issuer() -> spark_issuer::Issuer {
+    spark_issuer::Issuer::new(
+        spark_store::Db::new(),
+        spark_crypto::IssuerKey::generate(&mut Fixed(77)).expect("keygen"),
+    )
+}
+
+/// Buy a voucher through the real blind dance.
+pub fn buy_voucher(
+    is: &spark_issuer::Issuer,
+    serial: u8,
+    grant: spark_crypto::Grant,
+    payment: &[u8],
+) -> (spark_crypto::VoucherClaim, spark_crypto::Token) {
+    let claim = spark_crypto::VoucherClaim {
+        serial: [serial; 32],
+        grant,
+    };
+    let pk = is.signing_public();
+    let (blinded, b) = pk
+        .blind(&mut Fixed(serial as u64 + 1), &claim.encode())
+        .expect("blind");
+    let spark_issuer::Response::Signed(sig) = is.handle(spark_issuer::Request::Purchase {
+        blinded,
+        payment: payment.to_vec(),
+        amount: claim.price(),
+    }) else {
+        panic!("purchase refused")
+    };
+    (
+        claim,
+        pk.finalize(b, &sig, &claim.encode()).expect("finalize"),
+    )
+}

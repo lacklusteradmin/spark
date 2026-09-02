@@ -193,3 +193,150 @@ impl TokenClaim {
         v
     }
 }
+
+// ---------------------------------------------------------- payment vouchers
+
+/// What a voucher entitles its holder to.
+///
+/// The same primitive as a storage token, a different claim. `Spark-build-notes.md`
+/// §3: "One primitive serves storage tokens and payment vouchers."
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Grant {
+    /// Months of a name, at a tier.
+    ///
+    /// Two tiers because the fee has two jobs that pull apart (`Spark-spec.md` D1):
+    /// basic names are near-free so that blind tokens hide people in a crowd, and
+    /// premium names carry a real price and fund the service. Both unlock full
+    /// quota, so the paywall gates desirability rather than entry.
+    NameMonths {
+        /// How many months.
+        months: u8,
+        /// `true` for a premium name.
+        premium: bool,
+    },
+    /// Permanent storage, as a size class.
+    ///
+    /// "Storage is bought once and kept forever. No expiry, no renewal" (F9).
+    Storage {
+        /// `log2` of the bytes granted.
+        size_class: u8,
+    },
+}
+
+/// A voucher's message: a serial the buyer chose and what it entitles them to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct VoucherClaim {
+    /// Chosen by the buyer. The issuer never sees it — that is the point.
+    pub serial: [u8; 32],
+    /// What was bought.
+    pub grant: Grant,
+}
+
+impl VoucherClaim {
+    /// The bytes the issuer signs.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = b"spark/v1/voucher".to_vec();
+        v.extend_from_slice(&self.serial);
+        match self.grant {
+            Grant::NameMonths { months, premium } => {
+                v.extend_from_slice(&[1, months, premium as u8]);
+            }
+            Grant::Storage { size_class } => v.extend_from_slice(&[2, size_class, 0]),
+        }
+        v
+    }
+
+    /// What the issuer must be paid for this grant, in whatever unit the price
+    /// table uses.
+    ///
+    /// `Spark-spec.md` D9: "Premium pricing scales with scarcity [...] a price
+    /// table rather than a design question." This is the table, kept here so the
+    /// buyer and the issuer compute the same number from the same code.
+    pub fn price(&self) -> u64 {
+        match self.grant {
+            Grant::NameMonths { months, premium } => {
+                (if premium { 500 } else { 5 }) * months as u64
+            }
+            Grant::Storage { size_class } => 1u64 << size_class.saturating_sub(20),
+        }
+    }
+}
+
+// ------------------------------------------------------------ key rotation
+
+/// The signing key a service currently uses, and the one before it.
+///
+/// Bounds the blast radius of RUSTSEC-2023-0071: a recovered key mints only until
+/// the next rotation, rather than forever. Pacing (see [`crate::pace`]) is the
+/// control; this is what limits the damage if it turns out to be insufficient.
+///
+/// The previous key stays *verifiable* but not *signing*, so tokens drawn before
+/// a rotation keep working for one more period. Without that, rotating would
+/// invalidate every unspent token a user was holding.
+///
+/// **No epoch travels in the token.** A verifier tries each accepted key. Putting
+/// an epoch in the signed claim would work and would be cheaper to verify, but it
+/// would also partition tokens into an anonymity set per epoch, stamped on the
+/// token itself. Two verifications is a small price for not doing that.
+pub struct KeySet {
+    current: IssuerKey,
+    previous: Option<IssuerPublic>,
+    generation: u32,
+}
+
+impl KeySet {
+    /// Start with one key.
+    pub fn new(current: IssuerKey) -> Self {
+        Self {
+            current,
+            previous: None,
+            generation: 0,
+        }
+    }
+
+    /// The key to sign with.
+    pub fn signing(&self) -> &IssuerKey {
+        &self.current
+    }
+
+    /// How many times this set has rotated. Operational, not protocol: it appears
+    /// in no message and identifies nobody.
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Retire the current key in favour of `next`.
+    ///
+    /// The retired key can still verify; only the one before *it* stops being
+    /// accepted. So a token is good for at least one full rotation period after
+    /// it was drawn.
+    pub fn rotate(&mut self, next: IssuerKey) {
+        self.previous = Some(self.current.public());
+        self.current = next;
+        self.generation += 1;
+    }
+
+    /// Every key a verifier should accept, newest first.
+    pub fn accepted(&self) -> Vec<IssuerPublic> {
+        let mut v = vec![self.current.public()];
+        v.extend(self.previous.clone());
+        v
+    }
+}
+
+/// Verify a token against any of the keys a service currently accepts.
+///
+/// Tries every key rather than stopping at a match, so the work done does not
+/// depend on which key signed — the same reasoning as [`crate::pace`], applied to
+/// the verifier instead of the signer.
+pub fn verify_any(keys: &[IssuerPublic], token: &Token, msg: &[u8]) -> Result<(), BlindError> {
+    let mut ok = false;
+    for k in keys {
+        ok |= k.verify(token, msg).is_ok();
+    }
+    if ok {
+        Ok(())
+    } else {
+        Err(BlindError::NotAuthentic)
+    }
+}

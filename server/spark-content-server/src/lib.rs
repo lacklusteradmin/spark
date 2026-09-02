@@ -23,7 +23,7 @@
 #![deny(missing_docs)]
 
 use spark_chunk::{Chunk, Kind, media};
-use spark_crypto::{IssuerPublic, Token, TokenClaim};
+use spark_crypto::{IssuerPublic, Token, TokenClaim, verify_any};
 use spark_store::{Cell, Db};
 
 /// Table of stored chunks, keyed by chunk name.
@@ -125,7 +125,12 @@ pub enum Refusal {
 #[derive(Clone)]
 pub struct Content {
     db: Db,
-    issuer: IssuerPublic,
+    /// Every key the token issuer currently signs or recently signed with.
+    ///
+    /// A list rather than one key so the issuer can rotate — which bounds the
+    /// blast radius of RUSTSEC-2023-0071 — without invalidating every unspent
+    /// token a user is holding.
+    issuers: Vec<IssuerPublic>,
     /// Supplies receipts and voucher blinding. A parameter, not a syscall — the
     /// same discipline as everywhere below the I/O line, and it keeps this
     /// service's tests deterministic.
@@ -143,9 +148,14 @@ impl Content {
     /// Only the public half. This service cannot mint a token, and therefore
     /// cannot forge the evidence that someone paid for an upload.
     pub fn new(db: Db, issuer: IssuerPublic) -> Self {
+        Self::with_keys(db, vec![issuer])
+    }
+
+    /// As [`Content::new`], accepting several issuer keys during a rotation.
+    pub fn with_keys(db: Db, issuers: Vec<IssuerPublic>) -> Self {
         Self {
             db,
-            issuer,
+            issuers,
             counter: Default::default(),
         }
     }
@@ -189,7 +199,7 @@ impl Content {
     fn put(&self, name: [u8; 32], bytes: Vec<u8>, claim: TokenClaim, token: Token) -> Response {
         // Verify before spending: an unsigned serial must not be able to burn a
         // slot in the spent list, or anyone could lock out a token they guessed.
-        if self.issuer.verify(&token, &claim.encode()).is_err() {
+        if verify_any(&self.issuers, &token, &claim.encode()).is_err() {
             return Response::Refused(Refusal::BadToken);
         }
         if bytes.len() as u64 > claim.max_bytes() {

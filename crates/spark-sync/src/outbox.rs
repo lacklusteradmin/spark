@@ -14,7 +14,7 @@
 //! to reserve is through a call that returns the delta the caller must persist.
 
 use spark_chunk::{LaneId, Slot};
-use spark_keyring::{Delta, RoomId, SerLane};
+use spark_keyring::{Delta, RoomId};
 
 /// Proof that a slot was reserved before anything was encrypted for it.
 ///
@@ -76,10 +76,11 @@ impl Outbox {
     pub fn reserve(&mut self) -> (Reservation, Delta) {
         let slot = Slot::new(self.lane, self.next);
         self.next += 1;
-        let delta = Delta::AdvanceHead {
+        // A write cursor, not a read cursor. Advancing the read head here would
+        // make this client skip its own message when it next syncs.
+        let delta = Delta::ReserveSlot {
             room: self.room,
             epoch: self.epoch,
-            lane: SerLane::from(self.lane),
             seq: slot.seq,
         };
         (Reservation { slot }, delta)

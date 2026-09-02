@@ -25,7 +25,7 @@ use spark_issuer as issuer;
 use spark_keyring_server as keyring;
 
 mod common;
-use common::{Fixed, issuer, token};
+use common::{Fixed, buy_voucher, issuer, name_issuer, token};
 
 const PHRASE_A: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
                         abandon abandon abandon abandon abandon abandon abandon abandon \
@@ -67,7 +67,7 @@ fn exercise() -> Run {
         spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
     );
     let cs = content::Content::new(Db::new(), issuer().public());
-    let is = issuer::Issuer::new(Db::new());
+    let is = name_issuer();
     ks.set_minute(1_000_000);
 
     let auth = |id: &Identity| {
@@ -130,9 +130,9 @@ fn exercise() -> Run {
             generations: vec![spark_keyring::Generation {
                 epoch: 0,
                 root: Secret::new([0x5a; 32]),
-                heads: vec![],
+                my_next: 0,
             }],
-            mls_state: None,
+            mls_group_id: Vec::new(),
             display_name: "the usual".into(),
             my_lane: lane.into(),
         }));
@@ -144,10 +144,9 @@ fn exercise() -> Run {
             )),
             keyring::Response::SnapshotWritten
         );
-        let d = Delta::AdvanceHead {
+        let d = Delta::ReserveSlot {
             room: RoomId([7; 16]),
             epoch: 0,
-            lane: lane.into(),
             seq: 2,
         }
         .seal(id.keyring_key(), &nonce(2));
@@ -171,12 +170,22 @@ fn exercise() -> Run {
     }
 
     // --- a name, bought and then transferred to a key the seller never saw ---
+    let (claim, voucher) = buy_voucher(
+        &is,
+        1,
+        spark_crypto::Grant::NameMonths {
+            months: 12,
+            premium: false,
+        },
+        b"chain-tx-1",
+    );
     assert_eq!(
         is.handle(issuer::Request::Register {
             name: HANDLE.into(),
             key: pub64(&alice),
-            voucher: b"voucher-1".to_vec(),
-            paid_until_day: 20_400,
+            claim,
+            voucher,
+            today: 20_000,
         }),
         issuer::Response::Registered
     );

@@ -146,14 +146,14 @@ fn phase_one() -> Servers {
     gens.push(Generation {
         epoch: g1_epoch,
         root: g1_root.clone(),
-        heads: vec![],
+        my_next: 0,
     });
     deltas.push(Delta::OpenGeneration {
         room: ROOM,
         generation: Generation {
             epoch: g1_epoch,
             root: g1_root.clone(),
-            heads: vec![],
+            my_next: 0,
         },
     });
 
@@ -196,14 +196,14 @@ fn phase_one() -> Servers {
     gens.push(Generation {
         epoch: g2_epoch,
         root: g2_root.clone(),
-        heads: vec![],
+        my_next: 0,
     });
     deltas.push(Delta::OpenGeneration {
         room: ROOM,
         generation: Generation {
             epoch: g2_epoch,
             root: g2_root.clone(),
-            heads: vec![],
+            my_next: 0,
         },
     });
 
@@ -237,7 +237,7 @@ fn phase_one() -> Servers {
         k.apply(&Delta::UpsertRoom(KeyRoom {
             id: ROOM,
             generations: vec![],
-            mls_state: None,
+            mls_group_id: Vec::new(),
             display_name: "the crossing".into(),
             my_lane: c.lane().into(),
         }));
@@ -290,10 +290,25 @@ fn restore(servers: &Servers, id: &Identity) -> Vec<String> {
     let mut entries = Vec::new();
     // Every generation, oldest first. A restore that walked only the newest would
     // return half the history and still look plausible.
+    //
+    // The lanes are probed forward from zero rather than read off a cursor. A
+    // wiped device has no cursor — `heads` records what this account has *read*,
+    // and it read nothing before the wipe. This is what `Client::sync` does.
     for g in &r.generations {
-        for (lane, head) in &g.heads {
-            let lane: LaneId = (*lane).into();
-            for seq in 0..=*head {
+        let lanes: Vec<LaneId> = [
+            LaneId::message(&Identity::from_phrase(ALICE).unwrap().public().sign),
+            LaneId::message(&ident(2).public().sign),
+            LaneId::message(&ident(3).public().sign),
+            LaneId::COMMIT,
+        ]
+        .into_iter()
+        .collect();
+        for lane in lanes {
+            let mut misses = 0;
+            for seq in 0..8u64 {
+                if misses >= 3 {
+                    break;
+                }
                 let slot = Slot::new(lane, seq);
                 let name = room::name(&g.root, slot);
                 let content::Response::Chunk(bytes) =
@@ -301,8 +316,10 @@ fn restore(servers: &Servers, id: &Identity) -> Vec<String> {
                         name: *name.as_bytes(),
                     })
                 else {
+                    misses += 1;
                     continue;
                 };
+                misses = 0;
                 let chunk = Chunk::from_bytes(bytes).expect("chunk parses");
                 let plain = room::open(&g.root, slot, &chunk).expect("chunk opens");
                 entries.push(Entry::decode(&plain, slot).expect("entry decodes"));

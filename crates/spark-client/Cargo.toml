@@ -15,3 +15,7 @@ spark-keyring.workspace = true
 spark-sync.workspace = true
 spark-transport.workspace = true
 spark-tokens.workspace = true
+openmls_rust_crypto = "0.6"
+openmls_traits = "0.6"
+openmls_memory_storage = "0.6"
+postcard = { version = "1", default-features = false, features = ["alloc"] }

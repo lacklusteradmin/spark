@@ -30,8 +30,18 @@ pub struct Generation {
     pub epoch: u64,
     /// The archive secret every chunk name and key in this generation derives from.
     pub root: RoomRoot,
-    /// The highest sequence seen in each lane, as `(lane, seq)` sorted by lane.
-    pub heads: Vec<(SerLane, u64)>,
+    /// The next sequence this account will *write* in its own lane.
+    ///
+    /// Persisted before anything is sealed at that slot (`docs/protocol.md` §3.2).
+    /// This is the *only* cursor the keyring holds, and deliberately so.
+    ///
+    /// There is no read cursor here. One was tried and removed: the keyring is for
+    /// what cannot be re-derived, and how far an account has read can always be
+    /// re-derived by reading. Worse, persisting it breaks the thing the whole
+    /// design is for — a restored client resumes from a cursor while holding none
+    /// of the messages behind it, and never fetches them. Keeping it out also
+    /// keeps the keyring smaller, which is the growth W4 correlates on.
+    pub my_next: u64,
 }
 
 /// One room, as this account knows it.
@@ -41,9 +51,12 @@ pub struct Room {
     pub id: RoomId,
     /// Every generation, oldest first. Reading history means walking all of them.
     pub generations: Vec<Generation>,
-    /// The serialized MLS group state, so a restored client can rejoin the live
-    /// conversation rather than only read the archive.
-    pub mls_state: Option<Vec<u8>>,
+    /// Which MLS group this room is.
+    ///
+    /// The group *state* is one blob for the whole account (`Keyring::mls_state`),
+    /// because that is how the MLS provider stores it. This is the handle that
+    /// picks this room out of it.
+    pub mls_group_id: Vec<u8>,
     /// What the user calls this room. Local only.
     pub display_name: String,
     /// This account's own message lane.

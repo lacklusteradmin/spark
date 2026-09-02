@@ -81,6 +81,24 @@ fn credential(k: &VerifyingKey, signer: &Signer) -> CredentialWithKey {
     }
 }
 
+/// Publish a key package, serialized, so an owner can add this identity to a room.
+///
+/// Bytes rather than an OpenMLS type, so callers above this crate never need
+/// openmls in their own dependency list. Build-notes §3 says not to implement
+/// MLS; keeping its types out of the API is how that stays true of the callers
+/// too.
+pub fn publish_key_package<P: OpenMlsProvider>(
+    provider: &P,
+    me: &VerifyingKey,
+    signer: &Signer,
+) -> Result<Vec<u8>, RoomError> {
+    // Wrapped in MlsMessageOut, not serialized bare: the reader deserializes an
+    // MlsMessageIn, and the two framings must match or the package will not parse.
+    ser(&MlsMessageOut::from(
+        key_package(provider, me, signer)?.key_package().clone(),
+    ))
+}
+
 /// Publish a key package so an owner can add this identity to a room.
 pub fn key_package<P: OpenMlsProvider>(
     provider: &P,
@@ -183,6 +201,25 @@ impl Room {
         Ok(spark_crypto::Secret::new(a))
     }
 
+    /// Which MLS group this room is, for reloading it from storage.
+    pub fn group_id(&self) -> Vec<u8> {
+        self.group.group_id().as_slice().to_vec()
+    }
+
+    /// Reload a room from a provider whose storage has been restored.
+    ///
+    /// The counterpart to persisting the provider's storage. Without it a
+    /// recovered account holds every archive secret but does not know who is in
+    /// the room — and therefore which lanes to read.
+    pub fn load<P: OpenMlsProvider>(
+        provider: &P,
+        group_id: &[u8],
+    ) -> Result<Option<Self>, RoomError> {
+        MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
+            .map_err(|_| RoomError::Mls)
+            .map(|o| o.map(|group| Self { group }))
+    }
+
     /// The generation number, which is the MLS epoch.
     pub fn generation(&self) -> u64 {
         self.group.epoch().as_u64()
@@ -237,6 +274,29 @@ impl Room {
             .find(|m| m.credential.serialized_content() == who.as_bytes())
             .map(|m| m.index)
             .ok_or(RoomError::NotAMember)
+    }
+
+    /// Add a member from a serialized key package. Owners only.
+    pub fn add_member_bytes<P: OpenMlsProvider>(
+        &mut self,
+        provider: &P,
+        signer: &Signer,
+        key_package: &[u8],
+    ) -> Result<Commit, RoomError> {
+        let kp = match MlsMessageIn::tls_deserialize_exact_bytes(key_package)
+            .map_err(|_| RoomError::Mls)?
+            .extract()
+        {
+            MlsMessageBodyIn::KeyPackage(kp) => kp,
+            _ => return Err(RoomError::Mls),
+        };
+        // Validated, not merely parsed: this checks the package's own signature
+        // and lifetime before it ever reaches the group. Deserializing without
+        // validating would let a malformed package through to the add path.
+        let kp = kp
+            .validate(provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|_| RoomError::Mls)?;
+        self.add_member(provider, signer, &kp)
     }
 
     /// Add a member. Owners only.

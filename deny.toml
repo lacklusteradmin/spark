@@ -60,24 +60,24 @@ yanked = "deny"
 # in this file is not where a shipping decision should live.
 ignore = [
   { id = "RUSTSEC-2023-0071", reason = """
-THE MARVIN ATTACK. A real vulnerability, not an unmaintained notice, and the only
-one on this list.
+THE MARVIN ATTACK. A real vulnerability, not a maintenance notice.
 
 `rsa` is not constant-time, so an attacker who can time private-key operations
-over the network may recover the key. Spark performs exactly that operation on a
-server: the keyring service signs blinded storage tokens. Recovering the issuer
-key means minting unlimited tokens, which removes the economic floor D1 exists to
-provide — the one defence against mass account creation that Spark has.
+over the network may recover the key. Spark does that on two servers: the keyring
+service blind-signs storage tokens, the issuer blind-signs name vouchers.
 
-It reaches us through blind-rsa-signatures -> rsa. No patch exists; upstream work
-on a constant-time implementation is in progress.
+Base blinding IS applied on every signature (blind_sign_with_rng passes an RNG,
+and rsa randomises the base when given one), which is why the CVSS attack
+complexity is high. A mitigation, not a proof, and the advisory has no patched
+version.
 
-This is ignored to unblock development, NOT accepted for launch. Build-notes §1
-says escalate rather than improvise, so it is escalated: see README.md. Before any
-public deployment this needs one of — upstream landing constant-time RSA, moving
-the issuer to a different blind-signature construction, or the signing operation
-being placed somewhere an attacker cannot time it. Deleting this entry without
-doing one of those is the mistake it exists to prevent.
+Mitigated in Spark rather than merely accepted: responses are emitted on a fixed
+cadence (spark-crypto::pace) so measurable duration does not vary with input, and
+the signing keys rotate (spark-crypto::KeySet) so a recovered key mints for a
+bounded time. See README.md for why a different construction is not the answer.
+
+Revisit when rsa ships a constant-time implementation; the pacing then becomes
+defence in depth rather than the control.
 """ },
   { id = "RUSTSEC-2026-0173", reason = """
 proc-macro-error2 is unmaintained. Not a vulnerability — an unmaintained notice.

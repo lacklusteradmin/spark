@@ -229,7 +229,7 @@ fn a_slot_cannot_be_sealed_without_being_reserved_first() {
     assert_eq!(r0.slot(), Slot::new(lane(1), 0));
     assert!(matches!(
         d0,
-        spark_keyring::Delta::AdvanceHead { seq: 0, .. }
+        spark_keyring::Delta::ReserveSlot { seq: 0, .. }
     ));
 
     let (r1, _) = ob.reserve();

@@ -35,7 +35,7 @@ pub use model::{
 };
 
 use serde::{Deserialize, Serialize};
-use spark_chunk::{Chunk, ChunkError, Kind, LaneId};
+use spark_chunk::{Chunk, ChunkError, Kind};
 use spark_crypto::{Nonce, Secret};
 
 /// The keyring format version.
@@ -72,6 +72,12 @@ pub struct Keyring {
     pub names: Vec<HeldName>,
     /// Contact requests awaiting a decision.
     pub pending: Vec<String>,
+    /// The MLS provider's serialized storage, for every room at once.
+    ///
+    /// Without this a recovered account holds every archive secret but does not
+    /// know who is in its rooms, and so cannot work out which lanes to read. It is
+    /// the difference between recovering the keys and recovering the conversation.
+    pub mls_state: Option<Vec<u8>>,
 }
 
 impl Keyring {
@@ -88,22 +94,11 @@ impl Keyring {
         self.rooms.iter().find(|r| r.id == id)
     }
 
-    /// The highest sequence seen in one lane of a room's newest generation.
-    pub fn head(&self, id: RoomId, lane: LaneId) -> Option<u64> {
-        let l = SerLane::from(lane);
-        let g = self.room(id)?.generations.last()?;
-        g.heads.iter().find(|(k, _)| *k == l).map(|(_, s)| *s)
-    }
-
-    /// The head in a specific generation.
-    pub fn head_in(&self, id: RoomId, epoch: u64, lane: LaneId) -> Option<u64> {
-        let l = SerLane::from(lane);
-        let g = self
-            .room(id)?
-            .generations
-            .iter()
-            .find(|g| g.epoch == epoch)?;
-        g.heads.iter().find(|(k, _)| *k == l).map(|(_, s)| *s)
+    /// The next slot this account will write in a generation.
+    pub fn my_next(&self, id: RoomId, epoch: u64) -> u64 {
+        self.room(id)
+            .and_then(|r| r.generations.iter().find(|g| g.epoch == epoch))
+            .map_or(0, |g| g.my_next)
     }
 
     /// Total bytes this account currently holds, which is what quota measures.

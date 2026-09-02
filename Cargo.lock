@@ -1971,13 +1971,25 @@ dependencies = [
 name = "spark-cli"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
+ "spark-chunk",
  "spark-client",
+ "spark-content-server",
+ "spark-crypto",
+ "spark-issuer",
+ "spark-keyring",
+ "spark-keyring-server",
+ "spark-store",
 ]
 
 [[package]]
 name = "spark-client"
 version = "0.0.0"
 dependencies = [
+ "openmls_memory_storage",
+ "openmls_rust_crypto",
+ "openmls_traits",
+ "postcard",
  "spark-chunk",
  "spark-crypto",
  "spark-identity",
@@ -2117,6 +2129,7 @@ name = "spark-transport"
 version = "0.0.0"
 dependencies = [
  "spark-chunk",
+ "spark-crypto",
 ]
 
 [[package]]

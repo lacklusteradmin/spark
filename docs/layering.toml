@@ -66,7 +66,7 @@ role  = "lane merge, vector clocks, the total order every client must agree on, 
 name  = "spark-transport"
 layer = 4
 zone  = "io"
-deps  = ["spark-chunk"]
+deps  = ["spark-crypto", "spark-chunk"]
 role  = "the only crate below spark-client allowed to touch the network. Traffic-class routing (D2), SOCKS5 with per-circuit stream isolation, and a ledger of every connection opened — which is how gate 9 is checkable at all. WebSocket framing and TLS land with the client stage; Hysteria attaches at Transport::open."
 
 [[crate]]
@@ -94,10 +94,20 @@ role  = "UniFFI bindings. No logic."
 
 [[crate]]
 name  = "spark-cli"
-layer = 6
-zone  = "boundary"
-deps  = ["spark-client"]
-role  = "scripted verification harness. Not a user-facing product."
+layer = 11
+# `io`, not `boundary`. The boundary zone exists for the *FFI line* — the point
+# past which reproducible builds and the audit surface stop reaching, which is
+# spark-ffi and the Swift or Kotlin above it. spark-cli is a native Rust binary
+# inside the audited build, so the rule that bans cryptography above the FFI line
+# does not apply to it: it is not above the FFI line. It was marked `boundary`
+# because it sits at the top of the graph, which is a different thing.
+zone  = "io"
+# Above the servers, not beside them. The CLI is the one place that wires the
+# client to real service instances, which is what makes it a verification harness
+# rather than a demo — so it sits at the top of the whole graph, not in the
+# client's half of it.
+deps  = ["spark-client", "spark-keyring", "spark-keyring-server", "spark-content-server", "spark-issuer", "spark-store", "spark-crypto", "spark-chunk"]
+role  = "scripted verification harness. Not a user-facing product. Wires spark-client to in-process service instances and drives whole scenarios end to end."
 
 # ---- servers: separate graph, never depended on by client crates ----
 

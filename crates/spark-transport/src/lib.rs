@@ -13,18 +13,23 @@
 //! diagnostics — it is how gate 9's "shows zero direct connections" is checkable
 //! at all, and it is why `Connector` is a trait rather than a call to `TcpStream`.
 //!
+//! Also here: [`hysteria`], the fixed-schedule cover traffic of `Spark-spec.md` F12.
+//!
 //! Not here yet, and stated rather than implied: WebSocket framing and TLS.
 //! `docs/protocol.md` §6 specifies both. Gate 9 is about *where* connections go,
 //! and that is decided before a byte of TLS is written, so this ships the routing
-//! and leaves the framing for the client stage. Hysteria's fixed-schedule
-//! transmission (stage 11) attaches at [`Transport::open`] as well.
+//! and leaves the framing for the client stage.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod hysteria;
+pub mod push;
 pub mod route;
 pub mod socks;
 
+pub use hysteria::{Availability, Frame, Hysteria, HysteriaError, Platform, Reassembler};
+pub use push::{PushDisabled, Registration, Setting, Wake};
 pub use route::{Class, Mode};
 pub use socks::SocksError;
 

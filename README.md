@@ -11,14 +11,29 @@ A private, phone-number-free messenger that does one thing: chat.
 
 ## Status
 
-**Stage 9 of 12** (`Spark-build-notes.md` §5): Tor. Nine of eleven client crates
-and all three services are implemented. `spark-client` and `spark-ffi` are still
-stubs.
+**All twelve stages done, and it runs.** `spark-ffi` is the one remaining stub —
+the UniFFI bindings, which carry no logic of their own.
 
 ```bash
-cargo test --workspace             # 138 tests
+cargo test --workspace             # 197 tests
 scripts/verify-reproducible.sh     # 150 artifacts byte-identical across two builds
+cargo run -p spark-cli -- demo     # two accounts, a conversation, and what the servers kept
 ```
+
+`spark demo` stands up all three services in one process, runs two accounts
+through a conversation with the real client, and then prints the servers' entire
+contents and shows the plaintext is not in them. `spark new` generates a recovery
+phrase and the address it derives.
+
+**There is still no network.** `Services` is a trait and the only implementation
+is the in-process one; `docs/protocol.md` §6 specifies WebSocket over TLS, and
+`spark-transport` has the routing and the SOCKS5 but not the framing. That is the
+next piece of work, and it is a binding rather than a design.
+
+**Nothing here has been run on a phone.** `Spark-build-notes.md` §5 stage 12 calls
+for a mobile spike, and the two assumptions it names as most likely to fail —
+background cover traffic and privacy-preserving push — are exactly the two this
+repository answers on paper. See `docs/threats.toml`, W2 and W4.
 
 **Gate 1** — invariant tests fail against a deliberately broken stub; two
 independent builds of one commit are byte-identical. Both hold. The build
@@ -112,6 +127,54 @@ checked against a ledger of what the transport *did* rather than against the
 routing table: a test that only asked `Mode::uses_tor` would pass while the code
 ignored it.
 
+**Gate 10** — redemption cannot be linked to payment, or a name to the payment
+that bought it; a transfer leaves no record joining old key to new; an expired
+name does not reduce quota. All four hold, in
+`crates/spark-invariants/tests/gate10_namespace.rs`.
+
+The last one holds *structurally*: quota lives on the keyring service and names on
+the issuer, so the issuer has no reach into quota even in principle. F9's "quota
+belongs to the key, never to the name" is a consequence of the service split
+rather than a rule anything has to enforce.
+
+The issuer signs vouchers with **its own key**, not the keyring service's. One key
+shared between the service that sees money and the service that sees
+`hash(pubkey)` would let whoever holds it mint both, and would make the two trust
+domains one in every way that matters.
+
+**Gate 11** — idle and 100-message captures are indistinguishable in count, size
+and timing; the stream survives backgrounding, or the platform is documented as
+unable to support it. Both hold, in
+`crates/spark-transport/tests/hysteria.rs`. The capture is taken from *sealed*
+frames, because the observable is ciphertext — a test comparing plaintext would
+prove indistinguishability of something an observer never sees.
+
+**The backgrounding half is answered "documented as unable", for iOS.**
+`Spark-build-notes.md` §5 calls background cover traffic one of the two
+assumptions most likely to fail and says to verify it during the mobile spike.
+**That spike has not been run.** Until it is, iOS is treated as unable, because
+guessing the other way leaves a user believing their timing is covered when it is
+not. `enable()` is the only way to obtain a running schedule and it refuses on
+iOS, so "a setting that silently does less than it claims" is not something the
+API can express.
+
+**Gate 12** — every W1–W7 threat has an implemented mitigation or a documented
+accepted risk. `docs/threats.toml` is that reckoning and
+`crates/spark-invariants/tests/gate12_threats.rs` is what stops it becoming a
+document nobody checks: every mitigation must name a test that exists, every
+threat must say what remains *after* the mitigation, and every one must point at
+where the user is told. A threat with no answer fails the gate, because there is
+deliberately no third status.
+
+**Stage 12 produced one finding, and it blocks push.** `Spark-build-notes.md` §2
+says the servers may never store real-world identifiers. `Spark-spec.md` D3 says
+push is on by default. Delivering a push requires *something* to hold a mapping
+from an account to an Apple or Google token, and a push token is a real-world
+identifier. Both cannot hold as absolutes. No delivery service exists yet and none
+should be built until this is resolved — the options are a fourth trust domain
+holding that mapping and nothing else, push being opt-in rather than default, or
+no push. It is recorded in W2 rather than left to be discovered mid-implementation.
+
 ## The envelope
 
 ```text
@@ -176,6 +239,36 @@ WebSocket framing and TLS are not here yet, and `docs/protocol.md` §6 specifies
 both. Gate 9 is about *where* connections go, which is decided before a byte of
 TLS is written.
 
+## Push
+
+D3's requirement that is easiest to get wrong: "Off must mean never registering.
+Disabling notifications in the OS only stops them being displayed while the token
+persists, and a control that appears to close the leak while leaving it open is
+worse than none."
+
+So `register` takes the platform's minting call as a closure and does not invoke
+it when the setting is off. A token that was never minted cannot persist, cannot
+leak through a later bug, and cannot be found on the device afterwards. The test
+checks that the closure was never called, not that no token came back.
+
+## Cover traffic
+
+Three things have to be uniform, not one. F12: "Every transmission is padded to a
+uniform size and sent to the same endpoint, since an observer who can spot a dummy
+by length or destination gets the timing back for free." A schedule whose frames
+vary in size is a schedule with the answer written on it.
+
+There is deliberately no "nothing to send" path — `tick()` always returns a frame,
+because a skipped transmission is the signal the mode exists to suppress. Media is
+refused outright: a one-minute cadence over a photo is not a slower photo, and its
+timing is observable anyway, matching D2's mixed-mode tradeoff.
+
+The parameters are D12's, set for adoption rather than strength: cover traffic
+hides you inside a crowd on the same schedule, so a setting only a few hundred
+people enable makes those people a recognisable group. A test pins the daily cost
+at roughly 5.6 MB, so shrinking the interval for latency has to be a decision
+rather than a side effect.
+
 ## Metadata stripping
 
 `scrub` returns an error for any format it cannot fully account for, and
@@ -239,22 +332,57 @@ lane's arbitration point, and the backstop that makes derived room-chunk nonces
 safe); a duplicate upload is charged in full and answered identically to a fresh
 one; media is freed at zero holders while room chunks are deleted outright.
 
-## Blocking before launch
+## Known risk: RUSTSEC-2023-0071
 
-**RUSTSEC-2023-0071 — the Marvin Attack.** The `rsa` crate is not constant-time,
-so an attacker who can time private-key operations over the network may recover
-the key. Spark does exactly that on a server: the keyring service blind-signs
-storage tokens. Recovering the issuer key means minting unlimited tokens, which
-removes the economic floor `Spark-spec.md` D1 depends on — the only defence Spark
-has against mass account creation.
+**The Marvin Attack.** The `rsa` crate's modular exponentiation is not
+constant-time, so an attacker who can time private-key operations over the
+network may recover the key. Spark performs that operation on two servers: the
+keyring service blind-signs storage tokens, and the issuer blind-signs name
+vouchers. Recovering either key means minting them for free, which removes the
+economic floor `Spark-spec.md` D1 depends on.
 
-It arrives through `blind-rsa-signatures` -> `rsa`. No patch exists. It is ignored
-in `deny.toml` to unblock development and is **not accepted for launch**. Closing
-it needs one of:
+It arrives through `blind-rsa-signatures` -> `rsa`. The advisory has no patched
+version (`patched = []`), and `rsa`'s latest release is a release candidate.
 
-* upstream landing a constant-time RSA implementation;
-* moving the issuer to a different blind-signature construction;
-* placing the signing operation where an attacker cannot time it.
+**What is already true.** Base blinding *is* applied on every signature —
+`blind_sign_with_rng` passes an RNG and `rsa` randomises the base when given one.
+That is the classical defence against this class of attack, and it is why the
+advisory's CVSS says attack complexity is high
+(`AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N`). It is a mitigation, not a proof.
+
+**What Spark does about it**, since the library cannot yet be fixed:
+
+* **Responses go out on a fixed cadence** (`spark-crypto::pace`). The service
+  emits its answer on a tick boundary rather than as soon as the work finishes,
+  so the measurable duration does not vary with the input, whatever the library
+  underneath does. It wraps the whole request path — pacing the signature while
+  the surrounding parse and database write vary would leave the variance intact.
+  Work exceeding a tick is *counted*, not hidden, because past that point the
+  number of ticks varies and the channel is back, coarsened.
+* **The signing keys rotate** (`spark-crypto::KeySet`). A recovered key mints only
+  until the next rotation. The retired key stays verifiable for one more period,
+  so rotating does not invalidate tokens people are already holding — otherwise
+  nobody would ever rotate.
+
+**Why not a different construction.** Spark's tokens must be publicly verifiable:
+the keyring service issues and the content service verifies, and they are
+deliberately separate trust domains. That rules out VOPRF- and Privacy-Pass-style
+constructions, where verifying needs the secret key — using one would mean handing
+the content service the issuer's secret, collapsing exactly the separation the
+design rests on. Blind Schnorr is unsafe under concurrent signing (the ROS
+attack), and a token issuer signs concurrently by definition. Blind BLS and BBS+
+are publicly verifiable but have far less audited Rust. **The construction is
+right; the implementation is the problem.**
+
+Building RFC 9474 ourselves on top of a constant-time RSA from OpenSSL or
+aws-lc-rs was considered and rejected: that is the custom cryptography
+`Spark-build-notes.md` §1 forbids, and it would trade one timing bug for a whole
+class of implementation bugs.
+
+**Still open.** When `rsa` lands a constant-time implementation, the pacing
+becomes defence in depth rather than the control, and this section can shrink to a
+version bump. Until then the mitigations above are what stands between a recovered
+key and free storage.
 
 ## Setup
 

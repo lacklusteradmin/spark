@@ -22,15 +22,19 @@ pub mod kdf;
 pub mod kem;
 pub mod mac;
 pub mod mnemonic;
+pub mod pace;
 pub mod secret;
 pub mod sign;
 
 pub use aead::{AeadError, NONCE_LEN, Nonce, TAG_LEN};
-pub use blind::{BlindError, IssuerKey, IssuerPublic, Token, TokenClaim};
+pub use blind::{
+    BlindError, Grant, IssuerKey, IssuerPublic, KeySet, Token, TokenClaim, VoucherClaim, verify_any,
+};
 pub use hash::{Digest32, sha256, sha256_parts};
 pub use kdf::{Prk, expand, extract};
 pub use kem::{KemPublic, KemSecret};
 pub use mac::hmac_sha256_parts;
 pub use mnemonic::{Mnemonic, MnemonicError, Seed};
+pub use pace::{Clock, Paced, Pacing};
 pub use secret::Secret;
 pub use sign::{Signature, SignatureError, SigningKey, VerifyingKey};

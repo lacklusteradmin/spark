@@ -55,6 +55,17 @@ fields = [
   "paid_until_day",
   "blind_sig_count",
   "spent_voucher_serial",
+  # Prevents one payment minting unlimited vouchers. It is a reference to a
+  # transaction on a public chain, stored with nothing joined to it — no key, no
+  # voucher serial, no name. The ban list below targets fields that *link* a
+  # payment to a key; this one cannot, because at signing time the issuer has only
+  # a blinded message and could not record the link if it wanted to.
+  #
+  # F9 already accepts what this reveals: "A transparent chain lets an observer tie
+  # a KYC'd withdrawal to a payment, revealing that someone bought a voucher; the
+  # voucher still hides which account redeemed it."
+  "spent_payment_ref",
+  "name_tier",
 ]
 
 # Concepts that must never be stored, in any service, phrased as the words a

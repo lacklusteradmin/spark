@@ -14,7 +14,10 @@
 #![deny(missing_docs)]
 
 use spark_chunk::Chunk;
-use spark_crypto::{IssuerKey, IssuerPublic, Secret, Signature, VerifyingKey, hmac_sha256_parts};
+use spark_crypto::{
+    Clock, IssuerKey, IssuerPublic, KeySet, Pacing, Secret, Signature, VerifyingKey,
+    hmac_sha256_parts,
+};
 use spark_store::{Cell, Db};
 
 /// Table of keyring snapshots, keyed by address.
@@ -172,7 +175,9 @@ pub enum Refusal {
 #[derive(Clone)]
 pub struct Keyring {
     db: Db,
-    issuer: std::sync::Arc<IssuerKey>,
+    issuer: std::sync::Arc<std::sync::Mutex<KeySet>>,
+    pacing: Pacing,
+    overruns: std::sync::Arc<std::sync::atomic::AtomicU64>,
     server_secret: Secret<32>,
     /// The current minute, supplied rather than read from a clock. A `now()` here
     /// would make every test time-dependent and the challenge unverifiable in a
@@ -190,16 +195,60 @@ impl Keyring {
     pub fn new(db: Db, server_secret: Secret<32>, issuer: IssuerKey) -> Self {
         Self {
             db,
-            issuer: std::sync::Arc::new(issuer),
+            issuer: std::sync::Arc::new(std::sync::Mutex::new(KeySet::new(issuer))),
+            pacing: Pacing::DEFAULT,
+            overruns: Default::default(),
             server_secret,
             minute: Default::default(),
         }
     }
 
-    /// The token issuer's public key, which the content service needs to verify
-    /// spends and clients need to blind against.
+    /// The token issuer's public key, which clients blind against.
     pub fn issuer_public(&self) -> IssuerPublic {
-        self.issuer.public()
+        self.issuer.lock().expect("keyset lock").signing().public()
+    }
+
+    /// Every key the content service should accept, newest first.
+    pub fn accepted_keys(&self) -> Vec<IssuerPublic> {
+        self.issuer.lock().expect("keyset lock").accepted()
+    }
+
+    /// Retire the signing key in favour of `next`.
+    ///
+    /// Bounds the blast radius of RUSTSEC-2023-0071: a recovered key mints only
+    /// until the next rotation. The retired key still verifies, so tokens a user
+    /// already holds keep working for one more rotation period.
+    pub fn rotate_issuer_key(&self, next: IssuerKey) {
+        self.issuer.lock().expect("keyset lock").rotate(next);
+    }
+
+    /// How many requests took longer than one pacing tick.
+    ///
+    /// Non-zero means the tick is set too low for this machine and the timing
+    /// channel is partly open again. A service should alert on it rather than
+    /// discover it in an incident report.
+    pub fn pacing_overruns(&self) -> u64 {
+        self.overruns.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Handle a request on a fixed cadence.
+    ///
+    /// **This is the production entry point**, not [`Keyring::handle`]. It wraps
+    /// the whole request path, because pacing the signature while the surrounding
+    /// parse and database write vary would leave the variance intact.
+    ///
+    /// `handle` stays public and unpaced so the behaviour can be tested without a
+    /// clock — the pacing is a property of the service, not of the answers.
+    pub fn handle_paced<C: Clock>(&self, clock: &C, req: Request) -> Response {
+        let start = clock.now_nanos();
+        let out = self.handle(req);
+        let paced = self.pacing.after(clock.now_nanos().saturating_sub(start));
+        if paced.overran {
+            self.overruns
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        clock.sleep_nanos(paced.wait_nanos);
+        out
     }
 
     /// The store, for the permitted-knowledge audit.
@@ -242,7 +291,7 @@ impl Keyring {
                 return self.put_request(*addr, blob.clone(), token.clone());
             }
             Request::GetIssuerKey => {
-                return match self.issuer.public().to_der() {
+                return match self.issuer_public().to_der() {
                     Ok(d) => Response::IssuerKey(d),
                     Err(_) => Response::Refused(Refusal::Malformed),
                 };
@@ -469,7 +518,13 @@ impl Keyring {
         // nothing about the signature is recorded here.
         let mut out = Vec::with_capacity(blinded.len());
         for b in blinded {
-            match self.issuer.blind_sign(b) {
+            match self
+                .issuer
+                .lock()
+                .expect("keyset lock")
+                .signing()
+                .blind_sign(b)
+            {
                 Ok(sig) => out.push(sig),
                 Err(_) => return Response::Refused(Refusal::Malformed),
             }

@@ -11,7 +11,7 @@ use spark_issuer as issuer;
 use spark_keyring_server as keyring;
 
 mod common;
-use common::Fixed;
+use common::{Fixed, buy_voucher, name_issuer};
 
 fn ident(e: u8) -> Identity {
     Identity::from_mnemonic(&Mnemonic::from_entropy(&[e; 32]))
@@ -38,21 +38,31 @@ fn auth(ks: &keyring::Keyring, id: &Identity) -> keyring::Auth {
 
 #[test]
 fn the_issuer_answers_exact_names_and_nothing_else() {
-    let is = issuer::Issuer::new(Db::new());
+    let is = name_issuer();
     let alice = ident(1);
+    let (claim, voucher) = buy_voucher(
+        &is,
+        1,
+        spark_crypto::Grant::NameMonths {
+            months: 12,
+            premium: false,
+        },
+        b"chain-tx-1",
+    );
     assert_eq!(
         is.handle(issuer::Request::Register {
             name: "riverbank".into(),
             key: pub64(&alice),
-            voucher: b"v1".to_vec(),
-            paid_until_day: 20_400,
+            claim,
+            voucher,
+            today: 20_000,
         }),
         issuer::Response::Registered
     );
 
     // The exact name resolves, and yields enough to seal a request to.
     assert_eq!(
-        is.handle(issuer::Request::Resolve("riverbank".into())),
+        is.handle(issuer::Request::Resolve("riverbank".into(), 20_000)),
         issuer::Response::Resolved(Some(pub64(&alice)))
     );
 
@@ -68,7 +78,7 @@ fn the_issuer_answers_exact_names_and_nothing_else() {
         "*",
     ] {
         assert_eq!(
-            is.handle(issuer::Request::Resolve(probe.into())),
+            is.handle(issuer::Request::Resolve(probe.into(), 20_000)),
             issuer::Response::Resolved(None),
             "`{probe}` resolved; the namespace is enumerable"
         );

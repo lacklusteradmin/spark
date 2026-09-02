@@ -480,9 +480,9 @@ fn the_upload_list_never_judges_what_is_unused() {
         generations: vec![Generation {
             epoch: 0,
             root: Secret::new([1; 32]),
-            heads: vec![],
+            my_next: 0,
         }],
-        mls_state: None,
+        mls_group_id: Vec::new(),
         display_name: "r".into(),
         my_lane: LaneId::COMMIT.into(),
     }));

@@ -1,9 +1,9 @@
 //! A reader for the TOML subset the manifests in `docs/` actually use.
 //!
-//! Tables, arrays of tables, string / integer / string-array values, comments.
-//! No dates, no floats, no inline tables, no multi-line strings. Anything outside
-//! that subset is a parse error rather than a silent skip, so a manifest cannot
-//! quietly stop being checked.
+//! Tables, arrays of tables, string / integer / string-array values, multi-line
+//! basic strings, comments. No dates, no floats, no inline tables. Anything
+//! outside that subset is a parse error rather than a silent skip, so a manifest
+//! cannot quietly stop being checked.
 
 use std::collections::BTreeMap;
 
@@ -121,6 +121,41 @@ pub fn parse(src: &str) -> Result<Doc, String> {
             .ok_or_else(|| format!("line {lineno}: expected `key = value`, got `{line}`"))?;
         let key = key.trim().trim_matches('"').to_string();
         let mut val = first.trim().to_string();
+
+        // A multi-line basic string. Comments are not stripped inside one: a `#`
+        // in prose is a `#`, not the start of a comment.
+        if val.starts_with("\"\"\"") {
+            let mut body = raw[raw.find("\"\"\"").expect("just matched") + 3..].to_string();
+            if body.trim_end().ends_with("\"\"\"") && !body.trim().is_empty() {
+                // Opened and closed on one line.
+                let end = body.rfind("\"\"\"").expect("checked");
+                body.truncate(end);
+            } else {
+                loop {
+                    if i >= lines.len() {
+                        return Err(format!("line {lineno}: unterminated multi-line string"));
+                    }
+                    let l = lines[i];
+                    i += 1;
+                    if let Some(end) = l.find("\"\"\"") {
+                        body.push('\n');
+                        body.push_str(&l[..end]);
+                        break;
+                    }
+                    body.push('\n');
+                    body.push_str(l);
+                }
+            }
+            // TOML trims a newline immediately after the opening delimiter.
+            let body = body.strip_prefix('\n').unwrap_or(&body).to_string();
+            let path = if prefix.is_empty() {
+                key
+            } else {
+                format!("{prefix}.{key}")
+            };
+            doc.map.insert(path, Value::Str(body));
+            continue;
+        }
 
         // An array may span lines; consume until the brackets balance.
         if val.starts_with('[') {
