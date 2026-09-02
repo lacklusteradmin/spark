@@ -13,11 +13,52 @@ cd "$ROOT"
 # macOS ships `shasum` (perl); slim Linux images ship `sha256sum` (coreutils) and
 # often no perl at all. Pick whichever exists rather than assuming a platform.
 if command -v sha256sum >/dev/null 2>&1; then
-  hash_of() { sha256sum "$1" | cut -d" " -f1; }
+  raw_hash() { sha256sum "$1" | cut -d" " -f1; }
 else
-  hash_of() { shasum -a 256 "$1" | cut -d" " -f1; }
+  raw_hash() { shasum -a 256 "$1" | cut -d" " -f1; }
 fi
-export -f hash_of 2>/dev/null || true
+
+# On macOS, hash the artifact with its LC_UUID zeroed.
+#
+# Apple's linker derives LC_UUID from its *inputs*, including their paths, rather
+# than from the bytes it produces — so two builds of byte-identical content in
+# differently-named directories get different UUIDs, and the ad-hoc signature over
+# them differs too. It cannot simply be dropped: dyld refuses to execute a Mach-O
+# without one, so a build script linked that way never runs.
+#
+# This is therefore a weaker claim on macOS: identical *apart from the linker's
+# build identifier*. Linux gets the unqualified claim, with --build-id=none, and
+# that is where CI builds the artifacts a third party would check.
+NORMALISE=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  NORMALISE="yes"
+fi
+
+hash_of() {
+  if [ -z "$NORMALISE" ]; then
+    raw_hash "$1"
+    return
+  fi
+  python3 - "$1" <<'PYEOF'
+import hashlib, struct, sys
+b = bytearray(open(sys.argv[1], "rb").read())
+magic = struct.unpack("<I", b[:4])[0] if len(b) >= 4 else 0
+if magic in (0xFEEDFACF, 0xFEEDFACE):  # 64- and 32-bit Mach-O, little-endian
+    ncmds = struct.unpack("<I", b[16:20])[0]
+    off = 32 if magic == 0xFEEDFACF else 28
+    for _ in range(ncmds):
+        cmd, size = struct.unpack("<II", b[off:off + 8])
+        if size == 0:
+            break
+        if cmd == 0x1B:            # LC_UUID
+            b[off + 8:off + 24] = b"\x00" * 16
+        elif cmd == 0x1D:          # LC_CODE_SIGNATURE: hashes everything above
+            dataoff, datasize = struct.unpack("<II", b[off + 8:off + 16])
+            b[dataoff:dataoff + datasize] = b"\x00" * datasize
+        off += size
+print(hashlib.sha256(bytes(b)).hexdigest())
+PYEOF
+}
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/spark-repro.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -77,7 +118,15 @@ if [ -n "$EX" ]; then
 fi
 
 if [ "$MA" = "$MB" ]; then
-  echo "PASS: $(echo "$MA" | wc -l | tr -d ' ') artifacts byte-identical across two builds"
+  n=$(echo "$MA" | wc -l | tr -d ' ')
+  if [ -n "$NORMALISE" ]; then
+    echo "PASS: $n artifacts identical across two builds"
+    echo "      (macOS: compared with LC_UUID and the ad-hoc signature zeroed —"
+    echo "       Apple's linker derives the UUID from input paths, and dyld will not"
+    echo "       run a Mach-O without one. Linux gets the unqualified comparison.)"
+  else
+    echo "PASS: $n artifacts byte-identical across two builds"
+  fi
 else
   echo "FAIL: builds diverged" >&2
   diff <(echo "$MA") <(echo "$MB") >&2 || true

@@ -35,6 +35,13 @@ deps  = ["spark-crypto"]
 role  = "chunk format, AEAD sealing, lanes, and the two naming schemes: SHA-256(chunk) for media so the store can verify it, HMAC under the room root for history so an outsider cannot guess it"
 
 [[crate]]
+name  = "spark-wire"
+layer = 2
+zone  = "pure"
+deps  = ["spark-crypto"]
+role  = "the wire format of docs/protocol.md §6. Pure, so every property of the encoding is checkable without a socket. Deliberately not the servers' own request types: a server's Request is its implementation, this is the protocol, and keeping them apart means a change to either shows up as a change to the conversion between them."
+
+[[crate]]
 name  = "spark-mls"
 layer = 2
 zone  = "pure"
@@ -66,7 +73,7 @@ role  = "lane merge, vector clocks, the total order every client must agree on, 
 name  = "spark-transport"
 layer = 4
 zone  = "io"
-deps  = ["spark-crypto", "spark-chunk"]
+deps  = ["spark-crypto", "spark-chunk", "spark-wire"]
 role  = "the only crate below spark-client allowed to touch the network. Traffic-class routing (D2), SOCKS5 with per-circuit stream isolation, and a ledger of every connection opened — which is how gate 9 is checkable at all. WebSocket framing and TLS land with the client stage; Hysteria attaches at Transport::open."
 
 [[crate]]
@@ -106,7 +113,7 @@ zone  = "io"
 # client to real service instances, which is what makes it a verification harness
 # rather than a demo — so it sits at the top of the whole graph, not in the
 # client's half of it.
-deps  = ["spark-client", "spark-keyring", "spark-keyring-server", "spark-content-server", "spark-issuer", "spark-store", "spark-crypto", "spark-chunk"]
+deps  = ["spark-client", "spark-keyring", "spark-keyring-server", "spark-content-server", "spark-issuer", "spark-store", "spark-crypto", "spark-chunk", "spark-identity", "spark-transport", "spark-wire"]
 role  = "scripted verification harness. Not a user-facing product. Wires spark-client to in-process service instances and drives whole scenarios end to end."
 
 # ---- servers: separate graph, never depended on by client crates ----
@@ -122,7 +129,7 @@ role  = "storage that describes its own shape. Every write records its field nam
 name  = "spark-keyring-server"
 layer = 10
 zone  = "io"
-deps  = ["spark-crypto", "spark-chunk", "spark-store"]
+deps  = ["spark-crypto", "spark-chunk", "spark-store", "spark-wire"]
 role  = "trust domain 1: addr blobs, quota counters, token withdrawal. The only service that knows an account-shaped identifier exists"
 
 [[crate]]
@@ -130,14 +137,14 @@ name  = "spark-content-server"
 layer = 10
 zone  = "io"
 # spark-crypto for verifying blind tokens, and for the rule tests' Secret.
-deps  = ["spark-crypto", "spark-chunk", "spark-store"]
+deps  = ["spark-crypto", "spark-chunk", "spark-store", "spark-wire"]
 role  = "trust domain 2: account-free chunk store, write-once, receipts. Writes carry a blind token; reads carry nothing at all"
 
 [[crate]]
 name  = "spark-issuer"
 layer = 10
 zone  = "io"
-deps  = ["spark-crypto", "spark-store"]
+deps  = ["spark-crypto", "spark-store", "spark-wire"]
 role  = "trust domain 3: name mapping (overwritten on transfer, never appended), blind signing, payment nodes"
 
 # Crates in `pure` must not reach these, directly or transitively.

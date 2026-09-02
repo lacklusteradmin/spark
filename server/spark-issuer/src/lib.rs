@@ -20,6 +20,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod wire;
+
 use spark_crypto::{
     Clock, Grant, IssuerKey, IssuerPublic, KeySet, Pacing, Signature, Token, VerifyingKey,
     VoucherClaim, verify_any,

@@ -7,6 +7,7 @@ members = [
   "crates/spark-mls",
   "crates/spark-keyring",
   "crates/spark-sync",
+  "crates/spark-wire",
   "crates/spark-transport",
   "crates/spark-tokens",
   "crates/spark-client",
@@ -38,6 +39,7 @@ spark-chunk     = { path = "crates/spark-chunk" }
 spark-mls       = { path = "crates/spark-mls" }
 spark-keyring   = { path = "crates/spark-keyring" }
 spark-sync      = { path = "crates/spark-sync" }
+spark-wire      = { path = "crates/spark-wire" }
 spark-transport = { path = "crates/spark-transport" }
 spark-tokens    = { path = "crates/spark-tokens" }
 spark-client    = { path = "crates/spark-client" }

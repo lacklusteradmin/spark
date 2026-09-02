@@ -10,6 +10,9 @@
 //! The second half is the point. Anyone can claim a messenger is private; this
 //! prints the servers' entire contents and shows the plaintext is not in them.
 
+mod certs;
+mod remote;
+mod serve;
 mod wiring;
 
 use spark_client::Client;
@@ -60,6 +63,8 @@ fn main() {
     let code = match cmd {
         "new" => cmd_new(),
         "demo" => cmd_demo(),
+        "serve" => cmd_serve(&args[1..]),
+        "remote-demo" => cmd_remote_demo(),
         "help" | "--help" | "-h" => {
             usage();
             0
@@ -79,7 +84,11 @@ fn usage() {
          \n\
            new     generate a recovery phrase and show the address it derives\n\
            demo    run two accounts through a conversation against real services,\n\
-                   then print what those services were left holding\n",
+                   then print what those services were left holding\n\
+           serve   run the three services on TCP and stay up\n\
+                   (spark serve [keyring-port content-port issuer-port])\n\
+           remote-demo\n\
+                   the same conversation, over real sockets and the wire format\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -116,6 +125,147 @@ fn spark_identity_of(m: &Mnemonic) -> String {
 
 fn spark_identity_root_salt() -> &'static [u8] {
     b"spark/v1/root"
+}
+
+fn cmd_serve(args: &[String]) -> i32 {
+    let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+    let mut rng = OsRandom;
+    let (k, c, i) = build_services(&mut rng);
+    let (tls, pin) = match server_tls() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("could not build a server identity: {e}");
+            return 1;
+        }
+    };
+
+    let kl = match serve::keyring_service(&format!("127.0.0.1:{}", port(0, 9310)), tls.clone(), k) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("keyring service: {e}");
+            return 1;
+        }
+    };
+    let cl = serve::content_service(&format!("127.0.0.1:{}", port(1, 9311)), tls.clone(), c)
+        .expect("content");
+    let il =
+        serve::issuer_service(&format!("127.0.0.1:{}", port(2, 9312)), tls, i).expect("issuer");
+
+    println!("keyring   {}", kl.addr);
+    println!("content   {}", cl.addr);
+    println!("issuer    {}", il.addr);
+    println!("\npin       {}\n", pin.to_hex());
+    println!(
+        "Three listeners, three trust domains. Running them on one machine is a\n\
+         choice this command makes, not one the code assumes.\n\
+         \n\
+         Clients pin that key rather than asking a certificate authority. This one is\n\
+         generated fresh at startup, so the pin changes every restart — right for a\n\
+         harness, wrong for a deployment, which keeps its key. Ctrl-C to stop."
+    );
+    kl.join();
+    0
+}
+
+/// A server identity and the pin a client needs for it.
+fn server_tls() -> Result<(std::sync::Arc<rustls::ServerConfig>, spark_transport::Pin), String> {
+    let id = certs::generate("spark.local")?;
+    let key = rustls_pki_types::PrivateKeyDer::try_from(id.key)
+        .map_err(|e| format!("private key: {e}"))?;
+    let cfg = spark_transport::tls::server_config(id.cert, key).map_err(|e| e.to_string())?;
+    Ok((std::sync::Arc::new(cfg), id.pin))
+}
+
+fn build_services(
+    rng: &mut OsRandom,
+) -> (
+    std::sync::Arc<spark_keyring_server::Keyring>,
+    std::sync::Arc<spark_content_server::Content>,
+    std::sync::Arc<spark_issuer::Issuer>,
+) {
+    use std::sync::Arc;
+    let keyring = Arc::new(spark_keyring_server::Keyring::new(
+        spark_store::Db::new(),
+        spark_crypto::Secret::new([0x5e; 32]),
+        IssuerKey::generate(rng).expect("token key"),
+    ));
+    keyring.set_minute(1);
+    let content = Arc::new(spark_content_server::Content::with_keys(
+        spark_store::Db::new(),
+        keyring.accepted_keys(),
+    ));
+    let issuer = Arc::new(spark_issuer::Issuer::new(
+        spark_store::Db::new(),
+        IssuerKey::generate(rng).expect("voucher key"),
+    ));
+    (keyring, content, issuer)
+}
+
+fn cmd_remote_demo() -> i32 {
+    let mut rng = OsRandom;
+    let (k, c, i) = build_services(&mut rng);
+    let (tls, pin) = server_tls().expect("server identity");
+    let kl = serve::keyring_service("127.0.0.1:0", tls.clone(), k).expect("keyring");
+    let cl = serve::content_service("127.0.0.1:0", tls.clone(), c).expect("content");
+    let il = serve::issuer_service("127.0.0.1:0", tls, i).expect("issuer");
+    println!("services on {} {} {}", kl.addr, cl.addr, il.addr);
+    println!("pinned to  {}\n", pin.to_hex());
+
+    let conn = |who: &str| {
+        remote::Remote::connect(
+            &kl.addr.to_string(),
+            &cl.addr.to_string(),
+            &il.addr.to_string(),
+            &[pin],
+        )
+        .unwrap_or_else(|e| panic!("{who} could not connect: {e}"))
+    };
+
+    let mut alice =
+        Client::from_mnemonic(&Mnemonic::from_entropy(&[1; 32]), conn("alice")).expect("alice");
+    let mut bob =
+        Client::from_mnemonic(&Mnemonic::from_entropy(&[2; 32]), conn("bob")).expect("bob");
+
+    let room = alice.create_room(&mut rng, "the crossing").expect("room");
+    let kp = bob.key_package().expect("key package");
+    let inv = alice.invite(&mut rng, room, &kp).expect("invite");
+    bob.accept(&mut rng, &inv, "the crossing").expect("join");
+
+    for (who, text) in [
+        (0usize, "the boat leaves at six"),
+        (1, "understood, bringing the charts"),
+        (0, "do not be late"),
+    ] {
+        if who == 0 {
+            alice.sync(room, 3).expect("sync");
+            alice.send(&mut rng, room, text.as_bytes()).expect("send");
+        } else {
+            bob.sync(room, 3).expect("sync");
+            bob.send(&mut rng, room, text.as_bytes()).expect("send");
+        }
+    }
+
+    let alice_key = alice.public().sign;
+    for (name, msgs) in [
+        ("alice", alice.sync(room, 3).expect("sync")),
+        ("bob", bob.sync(room, 3).expect("sync")),
+    ] {
+        println!("{name} sees {} message(s):", msgs.len());
+        for m in &msgs {
+            let who = if m.from == alice_key {
+                "alice"
+            } else {
+                "bob  "
+            };
+            println!("    {who}  {}", String::from_utf8_lossy(&m.body));
+        }
+        println!();
+    }
+    println!(
+        "All of that crossed a TCP socket as WebSocket binary frames in the\n\
+              format of docs/protocol.md §6."
+    );
+    0
 }
 
 fn cmd_demo() -> i32 {

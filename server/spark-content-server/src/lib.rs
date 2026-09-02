@@ -22,6 +22,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod wire;
+
 use spark_chunk::{Chunk, Kind, media};
 use spark_crypto::{IssuerPublic, Token, TokenClaim, verify_any};
 use spark_store::{Cell, Db};

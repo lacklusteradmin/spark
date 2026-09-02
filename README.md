@@ -15,9 +15,11 @@ A private, phone-number-free messenger that does one thing: chat.
 the UniFFI bindings, which carry no logic of their own.
 
 ```bash
-cargo test --workspace             # 197 tests
-scripts/verify-reproducible.sh     # 150 artifacts byte-identical across two builds
-cargo run -p spark-cli -- demo     # two accounts, a conversation, and what the servers kept
+cargo test --workspace                    # 211 tests
+scripts/verify-reproducible.sh            # 193 artifacts byte-identical across two builds
+cargo run -p spark-cli -- demo            # two accounts in one process, and what the servers kept
+cargo run -p spark-cli -- remote-demo     # the same, over real sockets
+cargo run -p spark-cli -- serve           # the three services on TCP
 ```
 
 `spark demo` stands up all three services in one process, runs two accounts
@@ -25,10 +27,16 @@ through a conversation with the real client, and then prints the servers' entire
 contents and shows the plaintext is not in them. `spark new` generates a recovery
 phrase and the address it derives.
 
-**There is still no network.** `Services` is a trait and the only implementation
-is the in-process one; `docs/protocol.md` §6 specifies WebSocket over TLS, and
-`spark-transport` has the routing and the SOCKS5 but not the framing. That is the
-next piece of work, and it is a binding rather than a design.
+**There is a network now.** `spark-wire` is the format of `docs/protocol.md` §6,
+carried as WebSocket binary frames. `Services` has two implementations — one
+in-process, one over TCP — and `crates/spark-cli/tests/network.rs` runs the same
+client against both, because a client that works in-process and not over the wire
+means every earlier gate was testing the wrong one.
+
+**TLS is there, pinned to a key rather than delegated to the WebPKI.** Everything
+Spark sends is already sealed, so what TLS adds is server authentication and
+hiding the request pattern from a passive observer — neither of which the
+encryption above it does.
 
 **Nothing here has been run on a phone.** `Spark-build-notes.md` §5 stage 12 calls
 for a mobile spike, and the two assumptions it names as most likely to fail —
@@ -313,6 +321,55 @@ Two things the API states plainly because they are easy to get wrong:
   member therefore cannot unilaterally leave a room whose owners have stopped
   responding; F4 provides no takeover mechanism and this crate does not invent
   one.
+
+## The wire
+
+```text
+frame := req_id: u32le || opcode: u8 || payload
+```
+
+`spark-wire` is pure, so every property of the encoding is checkable without a
+socket. The opcode duplicates postcard's own variant tag on purpose — a server
+dispatches on the header before decoding anything an attacker chose — and a test
+asserts the two never disagree, so the duplication cannot rot. A frame whose
+header advertises one operation and whose body decodes to another is rejected: the
+header is what the dispatch trusted.
+
+The wire types are deliberately **not** the servers' own request types. A server's
+`Request` is its implementation; this is the protocol. Each server writes its own
+conversion, so a change to either side shows up as a change to that conversion
+rather than one silently becoming the other. Two tests read the protocol source
+directly: the issuer has no operation that could enumerate, and no content
+operation carries an identity.
+
+Everything is synchronous and generic over `Read + Write`, which is what lets
+TCP, SOCKS5 and WebSocket compose without any of them knowing about the others.
+Making it async would have meant the SOCKS5 negotiation knowing about a runtime,
+and the traffic-class routing decision leaking into every layer above it. The cost
+is a thread per connection, which for a first server is the right trade.
+
+## TLS, and why not the WebPKI
+
+A browser must reach any site in the world, so it trusts a large set of issuers.
+Spark reaches a handful of endpoints it operates, and the WebPKI's guarantee is
+"*some* CA vouched for this name" — there are on the order of a hundred and fifty
+of them, any one of which can be compelled. For software whose whole claim is
+that its operator cannot read your messages, that is a weaker statement than it
+sounds.
+
+So the client pins the server's **public key**, and the pin ships inside a
+reproducibly built binary: a user can check that what they run contains the pin
+they expect, which is not true of a trust store they inherited. The cost is
+operational and real — rotating a server key means shipping a new pin. Pinning the
+public key rather than the certificate is what keeps routine renewal free, and a
+test asserts exactly that.
+
+Over Tor this is partly redundant, since an onion address *is* a public key.
+Pinning covers the direct path, which D2's default mode uses for media.
+
+The verifier delegates handshake signature checking to rustls rather than
+reimplementing it. Pinning replaces *which* key to trust; it does not replace
+checking that the peer holds it, and that is the half where a mistake is silent.
 
 ## The three services
 

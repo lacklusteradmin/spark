@@ -49,6 +49,7 @@ pub struct Blinding {
 
 /// A finished token: the signature and what is needed to verify it.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Token {
     /// The unblinded signature.
     pub sig: Vec<u8>,
@@ -163,6 +164,7 @@ impl core::error::Error for BlindError {}
 /// they identify nobody; a token that carried an exact byte count would be far
 /// closer to a fingerprint.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TokenClaim {
     /// Chosen by the client, never by the issuer. The issuer never sees it.
     pub serial: [u8; 32],
@@ -201,6 +203,7 @@ impl TokenClaim {
 /// The same primitive as a storage token, a different claim. `Spark-build-notes.md`
 /// §3: "One primitive serves storage tokens and payment vouchers."
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Grant {
     /// Months of a name, at a tier.
     ///
@@ -225,6 +228,7 @@ pub enum Grant {
 
 /// A voucher's message: a serial the buyer chose and what it entitles them to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VoucherClaim {
     /// Chosen by the buyer. The issuer never sees it — that is the point.
     pub serial: [u8; 32],

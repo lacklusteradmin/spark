@@ -15,10 +15,18 @@ spark-client.workspace = true
 spark-crypto.workspace = true
 spark-chunk.workspace = true
 spark-store.workspace = true
+spark-transport.workspace = true
+spark-wire.workspace = true
+serde = { version = "1", default-features = false }
 spark-keyring-server = { path = "../../server/spark-keyring-server" }
 spark-content-server = { path = "../../server/spark-content-server" }
 spark-issuer = { path = "../../server/spark-issuer" }
 getrandom = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+rcgen = "0.14"
 
 [dev-dependencies]
 spark-keyring.workspace = true
+spark-identity.workspace = true
+spark-transport.workspace = true

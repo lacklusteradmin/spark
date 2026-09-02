@@ -32,4 +32,34 @@ export RUSTFLAGS="--remap-path-prefix=${OUT}=/target \
 --remap-path-prefix=${ROOT}=/spark \
 --remap-path-prefix=${CARGO_HOME_DIR}=/cargo"
 
+# The same job for the C compiler. `ring` builds C and assembly through the `cc`
+# crate, and those objects embed absolute paths that --remap-path-prefix never
+# sees, because it is a rustc flag. Defence in depth rather than a fix for
+# anything observed: no such path was found in the linked output.
+export CFLAGS="-ffile-prefix-map=${OUT}=/target -ffile-prefix-map=${ROOT}=/spark -ffile-prefix-map=${CARGO_HOME_DIR}=/cargo ${CFLAGS:-}"
+export CXXFLAGS="$CFLAGS"
+export ASMFLAGS="$CFLAGS"
+
+# Drop the linker's build identifier.
+#
+# This is what gate 1 caught when TLS arrived. Apple's linker derives LC_UUID
+# from its *inputs* — including their paths — rather than from the bytes it
+# produces, so two builds of identical content in differently-named directories
+# get different UUIDs, and the ad-hoc signature over them differs too. GNU ld's
+# --build-id is the same idea with the same consequence.
+#
+# The identifier exists to match a binary to its debug symbols. A release build
+# that ships no symbols has nothing to match, and a build nobody can reproduce is
+# worth less than one nobody can symbolicate.
+#
+# Only on Linux. macOS cannot simply drop it: dyld refuses to *execute* a Mach-O
+# with no LC_UUID, so a build script linked this way fails to run and the build
+# never finishes. There the identifier is normalised out of the comparison instead
+# (see verify-reproducible.sh), which is a weaker claim honestly stated rather than
+# a stronger one quietly assumed. CI builds in a pinned Linux container, so the
+# artifacts anyone would actually check are covered by the unqualified version.
+if [ "$(uname -s)" != "Darwin" ]; then
+  export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,--build-id=none"
+fi
+
 cargo build --release --locked --target-dir "$OUT" --workspace

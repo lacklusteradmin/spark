@@ -13,6 +13,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod wire;
+
 use spark_chunk::Chunk;
 use spark_crypto::{
     Clock, IssuerKey, IssuerPublic, KeySet, Pacing, Secret, Signature, VerifyingKey,

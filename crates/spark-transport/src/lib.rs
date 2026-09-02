@@ -23,15 +23,19 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod channel;
 pub mod hysteria;
 pub mod push;
 pub mod route;
 pub mod socks;
+pub mod tls;
 
+pub use channel::{Channel, ChannelError};
 pub use hysteria::{Availability, Frame, Hysteria, HysteriaError, Platform, Reassembler};
 pub use push::{PushDisabled, Registration, Setting, Wake};
 pub use route::{Class, Mode};
 pub use socks::SocksError;
+pub use tls::{Pin, TlsError};
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};

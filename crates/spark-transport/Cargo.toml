@@ -7,7 +7,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+spark-crypto.workspace = true
 spark-chunk.workspace = true
+spark-wire.workspace = true
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+serde = { version = "1", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+subtle = { version = "2", default-features = false }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 spark-crypto.workspace = true
