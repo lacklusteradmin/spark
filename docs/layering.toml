@@ -93,11 +93,25 @@ role  = "facade, state machine, event stream. The whole API surface."
 # ---- FFI line ----
 
 [[crate]]
-name  = "spark-ffi"
+name  = "spark-net"
 layer = 6
+zone  = "io"
+deps  = ["spark-client", "spark-crypto", "spark-transport", "spark-wire", "spark-chunk", "spark-keyring"]
+# The networked `Services`. It lived inside `spark-cli` until spark-ffi needed it,
+# which was the moment the arrangement stopped working: `spark-cli` is a binary
+# with no lib target, and it links all three servers. A mobile client cannot
+# depend on that, so the only client that could actually reach a network was the
+# one in the same binary as the servers it talked to.
+role  = "Remote: the Services implementation that speaks the wire protocol over Transport, with TLS pinning and the cover-traffic setting"
+
+[[crate]]
+name  = "spark-ffi"
+layer = 7
 zone  = "boundary"
-deps  = ["spark-client"]
-role  = "UniFFI bindings. No logic."
+deps  = ["spark-net"]
+# uniffi and thiserror are the only non-workspace dependencies, and neither
+# touches a key — which is the whole constraint on this zone.
+role  = "The FFI surface. Forwards to spark-net::Session; no logic, and no crate that touches a key."
 
 [[crate]]
 name  = "spark-cli"
@@ -113,7 +127,7 @@ zone  = "io"
 # client to real service instances, which is what makes it a verification harness
 # rather than a demo — so it sits at the top of the whole graph, not in the
 # client's half of it.
-deps  = ["spark-client", "spark-keyring", "spark-keyring-server", "spark-content-server", "spark-issuer", "spark-store", "spark-crypto", "spark-chunk", "spark-identity", "spark-transport", "spark-wire"]
+deps  = ["spark-client", "spark-net", "spark-ffi", "spark-keyring", "spark-keyring-server", "spark-content-server", "spark-issuer", "spark-store", "spark-crypto", "spark-chunk", "spark-identity", "spark-transport", "spark-wire"]
 role  = "scripted verification harness. Not a user-facing product. Wires spark-client to in-process service instances and drives whole scenarios end to end."
 
 # ---- servers: separate graph, never depended on by client crates ----

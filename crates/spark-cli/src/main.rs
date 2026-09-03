@@ -11,7 +11,6 @@
 //! prints the servers' entire contents and shows the plaintext is not in them.
 
 mod certs;
-mod remote;
 mod serve;
 mod wiring;
 
@@ -213,17 +212,17 @@ fn cmd_remote_demo(args: &[String]) -> i32 {
     // out a quarter of an hour — it is a demo knob, not a deployment one: a shorter
     // interval narrows the window an observer has to average over.
     let cover = match args.iter().position(|a| a == "--cover") {
-        None => remote::Cover::Off,
+        None => spark_net::Cover::Off,
         Some(i) => match args.get(i + 1).map(|s| s.parse::<u64>()) {
-            None => remote::Cover::DEFAULT,
-            Some(Ok(secs)) => remote::Cover::Every(std::time::Duration::from_secs(secs)),
+            None => spark_net::Cover::DEFAULT,
+            Some(Ok(secs)) => spark_net::Cover::Every(std::time::Duration::from_secs(secs)),
             Some(Err(_)) => {
                 eprintln!("--cover takes a number of seconds, or nothing for the default");
                 return 2;
             }
         },
     };
-    if let remote::Cover::Every(i) = cover {
+    if let spark_net::Cover::Every(i) = cover {
         println!("cover traffic on: one transmission every {}s.", i.as_secs());
         println!("this will take a while, which is the cost being demonstrated.\n");
     }
@@ -241,7 +240,7 @@ fn cmd_remote_demo(args: &[String]) -> i32 {
         // Tor off: this demo has no proxy to reach. Said explicitly, because a
         // default that quietly does less than the setting claims is the failure
         // `Spark-build-notes.md` §1 names.
-        remote::Remote::connect_via(
+        spark_net::Remote::connect_via(
             &kl.addr.to_string(),
             &cl.addr.to_string(),
             &il.addr.to_string(),

@@ -1,6 +1,17 @@
 //! A [`Services`] implementation that speaks the wire protocol.
 //!
-//! The counterpart to `wiring::Local`. Same client above it, same server logic
+//! layer 6, zone `io` — see `docs/layering.toml`.
+//!
+//! # Why this is its own crate
+//!
+//! It was a module inside `spark-cli` until `spark-ffi` needed it, which is when
+//! the arrangement stopped working. `spark-cli` is a binary with no lib target,
+//! and it links all three servers — so the only client that could reach a network
+//! was the one compiled into the same binary as the servers it talked to. A mobile
+//! client cannot depend on that, and nothing above the FFI line may implement the
+//! wire protocol itself, which would leave it with no way to connect at all.
+//!
+//! The counterpart to `spark-cli`'s `wiring::Local`. Same client above it, same server logic
 //! below it, a network in between — which is the point: if the client behaves
 //! differently against these two, one of them is wrong.
 //!
@@ -22,6 +33,9 @@
 //! their own gate while the real client connected straight out — so the Tor
 //! setting was a switch that did nothing, which is the failure
 //! `Spark-build-notes.md` §1 names outright.
+
+pub mod session;
+pub use session::{Config, FileHandle, Note, Room, Session, SessionError};
 
 use spark_client::{Auth, ContentService, IssuerService, KeyringService, ServiceError, Services};
 use spark_crypto::{Token, TokenClaim};

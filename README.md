@@ -11,12 +11,12 @@ A private, phone-number-free messenger that does one thing: chat.
 
 ## Status
 
-**All twelve stages done, and it runs.** `spark-ffi` is the one remaining stub —
-the UniFFI bindings, which carry no logic of their own.
+**All twelve stages done, and it runs.** Every crate is implemented; there are no
+stubs left.
 
 ```bash
-cargo test --workspace                    # 220 tests
-scripts/verify-reproducible.sh            # 193 artifacts byte-identical across two builds
+cargo test --workspace                    # 233 tests
+scripts/verify-reproducible.sh            # 251 artifacts byte-identical across two builds
 cargo run -p spark-cli -- demo            # two accounts in one process, and what the servers kept
 cargo run -p spark-cli -- remote-demo     # the same, over real sockets
 cargo run -p spark-cli -- serve           # the three services on TCP
@@ -38,10 +38,33 @@ Spark sends is already sealed, so what TLS adds is server authentication and
 hiding the request pattern from a passive observer — neither of which the
 encryption above it does.
 
+**There is an FFI, and it is reachable.** Building it turned up two blockers that
+were invisible while the only client was the CLI:
+
+`Remote` — the sole networked `Services` — lived inside `spark-cli`, which is a
+binary with **no lib target** and links all three servers. Nothing could depend on
+it, so the only client that could reach a network was the one compiled into the
+same binary as the servers it talked to. It is now `spark-net`.
+
+`Client`'s API cannot cross the FFI line at all. `docs/layering.toml` bans
+`spark-crypto`, `spark-identity`, `spark-chunk` and every cryptographic crate from
+the `boundary` zone — and `Client` speaks in `Mnemonic`, `Addr`, `ChunkName`,
+`Secret<32>` and an `R: CryptoRng`. So `spark_net::Session` converts, below the
+line: what crosses is `String`, `Vec<u8>` and `u64`. That is not cosmetic — a
+capability arriving as `Vec<u8>` is one the Swift side can carry but not
+construct, because it has nothing to construct one with. The OS entropy source
+stops there too, since a caller above the line has no safe way to supply one.
+
+`libspark_ffi.a` and `libspark_ffi.dylib` are in the reproducible set, so the
+binary a phone would load is byte-identical from source like everything else.
+
 **Nothing here has been run on a phone.** `Spark-build-notes.md` §5 stage 12 calls
 for a mobile spike, and the two assumptions it names as most likely to fail —
 background cover traffic and privacy-preserving push — are exactly the two this
-repository answers on paper. See `docs/threats.toml`, W2 and W4.
+repository answers on paper. See `docs/threats.toml`, W2 and W4. What is verified
+is that the bindings generate and compile: `uniffi-bindgen` produces Swift from
+the built library, and that Swift compiles with `swiftc`. What is *not* verified is
+anything about an app — no Xcode project, no device, no background execution.
 
 **Gate 1** — invariant tests fail against a deliberately broken stub; two
 independent builds of one commit are byte-identical. Both hold. The build

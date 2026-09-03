@@ -8,16 +8,13 @@
 #[path = "../src/certs.rs"]
 #[allow(dead_code)]
 mod certs;
-#[path = "../src/remote.rs"]
-#[allow(dead_code)]
-mod remote;
 #[path = "../src/serve.rs"]
 #[allow(dead_code)]
 mod serve;
 
-use remote::{Cover, Remote};
 use spark_client::Client;
 use spark_crypto::{IssuerKey, Mnemonic, Secret};
+use spark_net::{Cover, Remote};
 use spark_store::Db;
 use std::sync::Arc;
 

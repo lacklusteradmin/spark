@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 spark-client.workspace = true
+spark-net.workspace = true
 spark-crypto.workspace = true
 spark-chunk.workspace = true
 spark-store.workspace = true
@@ -27,6 +28,7 @@ rustls-pki-types = "1"
 rcgen = "0.14"
 
 [dev-dependencies]
+spark-ffi.workspace = true
 spark-keyring.workspace = true
 spark-identity.workspace = true
 spark-transport.workspace = true

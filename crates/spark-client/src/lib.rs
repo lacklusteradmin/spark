@@ -682,7 +682,18 @@ impl<S: Services> core::fmt::Debug for Client<S> {
 /// The past generation roots are the out-of-band re-share `Spark-spec.md` F4
 /// flags as sitting outside MLS's guarantees. They are here, in one field, rather
 /// than spread through the protocol.
-#[derive(Clone)]
+///
+/// # On serializing it
+///
+/// The derives exist because an invitation has to reach a joiner who is not in
+/// this process — over the FFI to a mobile app, and from there by whatever channel
+/// two people already trust. The encoded bytes are **not** public: they carry
+/// every past generation root, which is the archive key for the room's whole
+/// history. `Debug` redacts them for exactly that reason and continues to; a
+/// serializer cannot, because the joiner needs them. Anything that moves this blob
+/// is responsible for confidentiality, and `Spark-spec.md` F4 is where that being
+/// out-of-band is accounted for.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Invitation {
     /// The MLS welcome.
     pub welcome: Vec<u8>,
