@@ -63,21 +63,32 @@ ignore = [
 THE MARVIN ATTACK. A real vulnerability, not a maintenance notice.
 
 `rsa` is not constant-time, so an attacker who can time private-key operations
-over the network may recover the key. Spark does that on two servers: the keyring
-service blind-signs storage tokens, the issuer blind-signs name vouchers.
+over the network may recover the key. The advisory reads `patched = []` and names
+one workaround: avoid the crate where attackers can observe timing.
 
-Base blinding IS applied on every signature (blind_sign_with_rng passes an RNG,
-and rsa randomises the base when given one), which is why the CVSS attack
-complexity is high. A mitigation, not a proof, and the advisory has no patched
-version.
+Spark no longer performs a private-key operation in it. RFC 9474 blind signing is
+`s = m^d mod n`; that exponentiation is done in blind::ct::modexp against
+crypto-bigint's constant-time modexp, which is already in the graph and is how
+RustCrypto intends to fix this advisory. `rsa` remains present only because
+blind-rsa-signatures uses it for blinding, unblinding and verification -- all
+public-key operations, no secret, nothing to time. Key generation still runs in
+it, once, at server setup, offline, with no attacker-chosen input.
 
-Mitigated in Spark rather than merely accepted: responses are emitted on a fixed
-cadence (spark-crypto::pace) so measurable duration does not vary with input, and
-the signing keys rotate (spark-crypto::KeySet) so a recovered key mints for a
-bounded time. See README.md for why a different construction is not the answer.
+This ignore is not on trust. Two tests hold it:
 
-Revisit when rsa ships a constant-time implementation; the pacing then becomes
-defence in depth rather than the control.
+  spark-crypto/tests/blind.rs::signing_matches_the_reference_implementation
+    -- our signatures equal the library's, byte for byte, same key, same input.
+  spark-invariants/tests/marvin_pacing.rs
+    ::no_secret_key_operation_goes_through_the_unpatched_rsa_crate
+    -- fails if anything but `components()` is called on the library's secret
+       key. Restoring the vulnerable path is one shorter line that produces
+       identical bytes, so no graph-level check would catch it.
+
+Pacing (spark-crypto::pace) and key rotation (KeySet) stay as defence in depth;
+they also cover the request-path variance that was never RSA's.
+
+Remove this entry when `rsa` ships a constant-time implementation, or when
+blind-rsa-signatures no longer depends on it. See README.md for the full account.
 """ },
   { id = "RUSTSEC-2026-0173", reason = """
 proc-macro-error2 is unmaintained. Not a vulnerability — an unmaintained notice.

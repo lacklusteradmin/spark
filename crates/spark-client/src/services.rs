@@ -12,6 +12,7 @@
 //! services learn. Reading it is the fastest way to check that claim.
 
 use spark_crypto::{Token, TokenClaim};
+pub use spark_transport::Class;
 
 /// Proof that the caller holds the key behind an address.
 #[derive(Clone, Debug)]
@@ -78,19 +79,36 @@ pub trait KeyringService {
 }
 
 /// The content service. No accounts, ever.
+///
+/// Every method takes a traffic [`Class`], because this is the one service whose
+/// requests fall on both sides of `Spark-spec.md` D2's default mode: room-log
+/// chunks are text and go over Tor, media chunks are bulk and go direct. A single
+/// connection here would force one routing decision for both, and the mixed mode
+/// would be impossible to offer.
+///
+/// It is an argument rather than something inferred from the chunk, for the same
+/// reason it is one in `Transport::open`: a request whose class nobody decided is
+/// a request routed by accident, and the accident is always media escaping in a
+/// mode the user believed covered it.
 pub trait ContentService {
     /// Store a chunk, authorised by a blind token.
     fn put(
         &self,
+        class: Class,
         name: &[u8; 32],
         chunk: &[u8],
         claim: TokenClaim,
         token: &Token,
     ) -> Result<[u8; 32], ServiceError>;
     /// Fetch a chunk. Carries no identity.
-    fn get(&self, name: &[u8; 32]) -> Result<Option<Vec<u8>>, ServiceError>;
+    fn get(&self, class: Class, name: &[u8; 32]) -> Result<Option<Vec<u8>>, ServiceError>;
     /// Return a receipt, freeing the chunk at zero holders.
-    fn release(&self, name: &[u8; 32], receipt: &[u8; 32]) -> Result<Vec<u8>, ServiceError>;
+    fn release(
+        &self,
+        class: Class,
+        name: &[u8; 32],
+        receipt: &[u8; 32],
+    ) -> Result<Vec<u8>, ServiceError>;
 }
 
 /// The issuer. Blind, and never browsable.

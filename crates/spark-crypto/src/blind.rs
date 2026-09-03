@@ -75,12 +75,166 @@ impl IssuerKey {
     /// The issuer learns nothing about what it signed. That is what lets the
     /// keyring service charge quota for a token while the content service, which
     /// later sees it spent, cannot tell which account drew it.
+    ///
+    /// # Why this is not `blind_rsa_signatures::SecretKey::blind_sign`
+    ///
+    /// That call would route the private exponentiation through the `rsa` crate,
+    /// which is not constant-time: RUSTSEC-2023-0071, the Marvin Attack. The
+    /// advisory has `patched = []` and names exactly one workaround — "avoid using
+    /// the `rsa` crate in settings where attackers are able to observe timing
+    /// information". Two Spark servers do precisely that, on input the attacker
+    /// chose, over the network.
+    ///
+    /// So the one operation that touches the private key is done here instead,
+    /// against `crypto_bigint`'s constant-time modular exponentiation. Everything
+    /// else about RFC 9474 — the PSS encoding, the blinding, the unblinding, the
+    /// verification — stays in `blind-rsa-signatures`, because none of it touches
+    /// a secret and all of it is fiddly to get right. The bytes are identical
+    /// either way; `signing_matches_the_reference_implementation` is what holds
+    /// that to account.
     pub fn blind_sign(&self, blind_message: &[u8]) -> Result<Vec<u8>, BlindError> {
-        self.0
-            .sk
-            .blind_sign(blind_message)
-            .map(|s| s.0)
-            .map_err(|_| BlindError::Crypto)
+        let c = self.0.sk.components();
+        let (n, e) = (c.n(), c.e());
+        let sig = ct::modexp(blind_message, &c.d(), &n)?;
+
+        // Re-encrypt and compare, which is what the reference implementation does
+        // too. It converts a fault — injected, or mine — from a signature that
+        // silently leaks into a request that fails. Through the public path, whose
+        // ladder is bounded by e's 17 bits rather than the modulus's 2048: running
+        // it constant-time would double the cost of signing to hide a number that
+        // is printed in the public key.
+        let back = ct::public_modexp(&sig, &e, &n)?;
+        if back != blind_message {
+            return Err(BlindError::Crypto);
+        }
+        Ok(sig)
+    }
+}
+
+/// The private-key operation, in constant time.
+///
+/// RFC 9474 §5: signing a blinded message is `s = m^d mod n` and nothing else —
+/// the blinded message arrives already PSS-encoded by the client, so there is no
+/// padding step on this side and no branch that could depend on the key.
+mod ct {
+    use super::BlindError;
+    use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
+    use crypto_bigint::{BoxedUint, Odd};
+
+    /// Re-encode a big-endian integer in exactly `len` bytes.
+    ///
+    /// `None` if it does not fit. Left-pads a short one, and drops a leading run of
+    /// zeroes only after confirming with a branch-free fold that it *is* all zeroes.
+    fn narrow(be: &[u8], len: usize) -> Option<Vec<u8>> {
+        if be.len() <= len {
+            let mut out = vec![0u8; len];
+            out[len - be.len()..].copy_from_slice(be);
+            return Some(out);
+        }
+        let (high, low) = be.split_at(be.len() - len);
+        let any = high.iter().fold(0u8, |a, b| a | b);
+        (any == 0).then(|| low.to_vec())
+    }
+
+    /// `base^exp mod modulus`, with every operand at the modulus's precision.
+    ///
+    /// Precision, not bit length, is what sets the number of squarings — see
+    /// `crypto_bigint`'s note that `exponent_bits` leaks in the time pattern. Every
+    /// operand is widened to the modulus's precision here, so the work done is a
+    /// function of the key *size*, which is public, and not of the key.
+    pub fn modexp(base: &[u8], exp: &[u8], modulus: &[u8]) -> Result<Vec<u8>, BlindError> {
+        // `None` means "use the full precision", which is what makes the work a
+        // function of the key size rather than of the key.
+        pow(base, exp, modulus, None)
+    }
+
+    /// `base^exp mod modulus` for a *public* exponent.
+    ///
+    /// Bounded by the exponent's actual bit length instead of the modulus's
+    /// precision, which leaks that length in the time pattern — and is fine,
+    /// because the only exponent passed here is `e`, which ships in the public key.
+    /// The difference is not cosmetic: at full precision this would do 2048
+    /// squarings for a 17-bit exponent and double the cost of signing.
+    pub fn public_modexp(base: &[u8], exp: &[u8], modulus: &[u8]) -> Result<Vec<u8>, BlindError> {
+        let bits = BoxedUint::from_be_slice_vartime(exp).bits();
+        pow(base, exp, modulus, Some(bits.max(1)))
+    }
+
+    fn pow(
+        base: &[u8],
+        exp: &[u8],
+        modulus: &[u8],
+        exp_bits: Option<u32>,
+    ) -> Result<Vec<u8>, BlindError> {
+        let n = BoxedUint::from_be_slice_vartime(modulus);
+        let bits = n.bits_precision();
+        let n = Odd::new(n).into_option().ok_or(BlindError::Crypto)?;
+
+        // An even modulus has no Montgomery form, and a base at or above the
+        // modulus is not a signable message. Both are properties of the key and of
+        // a well-formed request, not of any secret, so rejecting them early leaks
+        // nothing.
+        if base.len() != modulus.len() {
+            return Err(BlindError::Crypto);
+        }
+        let m = BoxedUint::from_be_slice(base, bits).map_err(|_| BlindError::Crypto)?;
+        if m >= *n.as_ref() {
+            return Err(BlindError::Crypto);
+        }
+
+        // The private exponent arrives wider than the modulus — the `rsa` crate computes it at
+        // extended precision and hands back every byte of that representation, 384
+        // for a 2048-bit key. It is numerically below the modulus, so the extra
+        // bytes are zero; narrowing to the modulus width is what keeps the ladder
+        // at 2048 squarings rather than 3072.
+        //
+        // Checked rather than assumed, and with an OR-fold rather than a search:
+        // a truncation that silently dropped a set bit would produce a signature
+        // that verifies for nobody, and finding that from the outside is much
+        // harder than refusing here.
+        let e = narrow(exp, modulus.len()).ok_or(BlindError::Crypto)?;
+        let e = BoxedUint::from_be_slice(&e, bits).map_err(|_| BlindError::Crypto)?;
+        let params = BoxedMontyParams::new(n);
+        let m = BoxedMontyForm::new(m, &params);
+        let s = match exp_bits {
+            None => m.pow(&e),
+            Some(b) => m.pow_bounded_exp(&e, b),
+        }
+        .retrieve();
+
+        // Left-padded to the modulus length, which RFC 9474 requires and which a
+        // short big-endian encoding would silently break.
+        let mut out = vec![0u8; modulus.len()];
+        let be = s.to_be_bytes();
+        let n = be.len().min(out.len());
+        out[modulus.len() - n..].copy_from_slice(&be[be.len() - n..]);
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::narrow;
+
+        /// The case the signing tests cannot reach.
+        ///
+        /// For a well-formed key the bytes above the modulus width are zero, so
+        /// dropping them unchecked gives the same signature and every test still
+        /// passes. The check earns its place only on input that does not fit —
+        /// a different key size, or a library that changes how it stores `d` —
+        /// where the alternative is a silently wrong exponent and signatures that
+        /// verify for nobody.
+        #[test]
+        fn a_value_too_wide_to_fit_is_refused_rather_than_truncated() {
+            assert_eq!(narrow(&[0, 0, 1, 2], 2), Some(vec![1, 2]), "zero padding");
+            assert_eq!(narrow(&[1, 2], 4), Some(vec![0, 0, 1, 2]), "left-padded");
+            assert_eq!(narrow(&[7, 7], 2), Some(vec![7, 7]), "exact width");
+            assert_eq!(narrow(&[], 2), Some(vec![0, 0]), "empty");
+
+            assert_eq!(narrow(&[1, 0, 0], 2), None, "a set bit above the width");
+            // The last byte of the discarded run, which an off-by-one in the split
+            // would let through.
+            assert_eq!(narrow(&[0, 1, 9, 9], 2), None, "a set bit at the boundary");
+        }
     }
 }
 

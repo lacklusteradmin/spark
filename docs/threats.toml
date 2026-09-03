@@ -127,6 +127,9 @@ several mailboxes at one instant.
 evidence = [
   "crates/spark-transport/tests/hysteria.rs::idle_and_busy_captures_are_indistinguishable",
   "crates/spark-transport/tests/hysteria.rs::a_burst_does_not_change_the_schedule",
+  "crates/spark-cli/tests/cover_traffic.rs::an_idle_connection_and_a_busy_one_look_the_same",
+  "crates/spark-cli/tests/cover_traffic.rs::every_transmission_is_the_same_size_in_both_directions",
+  "crates/spark-cli/tests/network.rs::a_paced_client_holds_a_whole_conversation",
   "crates/spark-invariants/tests/gate6_recovery.rs::the_servers_entire_database_yields_no_graph_edge",
 ]
 residual = """
@@ -134,6 +137,14 @@ Keyring-growth correlation remains open, as the spec says. Cover traffic hides
 network timing, not the fact that several keyrings grew at once. Cover traffic is
 also unavailable on iOS (see W2's platform note), so the mitigation does not reach
 every user.
+
+It is off by default on the desktop client, so for anyone who does not turn it on
+this threat is unmitigated rather than mitigated. That is a real gap and not a
+wording problem: at F12's minute a request waits up to a minute, which is not a
+default a messenger can ship. The first three tests above are what the mitigation
+rests on when it is on; the fourth is what stops `Cover` from becoming a setting
+that is accepted and ignored, which is what happened to the Tor mode for three
+stages.
 """
 stated_to_user = "crates/spark-transport/src/hysteria.rs::Availability"
 

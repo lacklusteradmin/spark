@@ -59,6 +59,15 @@ impl Frame {
     pub fn is_dummy(&self) -> bool {
         self.0[0] == 0
     }
+
+    /// Wrap bytes received from a peer.
+    ///
+    /// Returns `None` for anything that is not exactly [`FRAME_BYTES`] long. A
+    /// frame of another size is not a frame: uniform size is the property, so
+    /// accepting a short one would be accepting the thing being defended against.
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        (b.len() == FRAME_BYTES).then(|| Self(b.to_vec()))
+    }
 }
 
 impl core::fmt::Debug for Frame {

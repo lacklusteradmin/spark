@@ -25,6 +25,7 @@
 
 pub mod channel;
 pub mod hysteria;
+pub mod paced;
 pub mod push;
 pub mod route;
 pub mod socks;
@@ -32,8 +33,10 @@ pub mod tls;
 
 pub use channel::{Channel, ChannelError};
 pub use hysteria::{Availability, Frame, Hysteria, HysteriaError, Platform, Reassembler};
+pub use paced::{Immediate, Paced, RealTicker, Ticker};
 pub use push::{PushDisabled, Registration, Setting, Wake};
 pub use route::{Class, Mode};
+// `TcpConnector` is defined at the bottom of this file.
 pub use socks::SocksError;
 pub use tls::{Pin, TlsError};
 
@@ -199,3 +202,24 @@ impl core::fmt::Display for TransportError {
     }
 }
 impl core::error::Error for TransportError {}
+
+/// Opens ordinary TCP connections.
+///
+/// The default [`Connector`], and the one every real deployment uses. It is a
+/// separate type rather than the trait's default because a test wants to observe
+/// where connections went, and something has to be substitutable for that to be
+/// possible — which is the same reason gate 9 is checkable at all.
+///
+/// Note what it does *not* do: TLS. `Transport::open` hands back a stream that has
+/// reached the destination, through SOCKS5 if the mode said so; wrapping that in
+/// TLS is the caller's next step. Doing it here would mean the TLS handshake
+/// happening before SOCKS5 had chosen a circuit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TcpConnector;
+
+impl Connector for TcpConnector {
+    type Stream = std::net::TcpStream;
+    fn connect(&self, host: &str, port: u16) -> std::io::Result<Self::Stream> {
+        std::net::TcpStream::connect((host, port))
+    }
+}

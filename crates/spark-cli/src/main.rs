@@ -64,7 +64,7 @@ fn main() {
         "new" => cmd_new(),
         "demo" => cmd_demo(),
         "serve" => cmd_serve(&args[1..]),
-        "remote-demo" => cmd_remote_demo(),
+        "remote-demo" => cmd_remote_demo(&args[1..]),
         "help" | "--help" | "-h" => {
             usage();
             0
@@ -88,7 +88,13 @@ fn usage() {
            serve   run the three services on TCP and stay up\n\
                    (spark serve [keyring-port content-port issuer-port])\n\
            remote-demo\n\
-                   the same conversation, over real sockets and the wire format\n",
+                   the same conversation, over real sockets and the wire format\n\
+                   (spark remote-demo [--cover [seconds]])\n\
+                   --cover paces every transmission onto a fixed schedule, so an\n\
+                   observer cannot tell when there was something to say. It is off\n\
+                   by default because it is slow, and slow is the point: at the\n\
+                   spec's 60s a demo of a dozen requests takes a quarter of an\n\
+                   hour. Give a shorter interval to watch it work.\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -201,7 +207,27 @@ fn build_services(
     (keyring, content, issuer)
 }
 
-fn cmd_remote_demo() -> i32 {
+fn cmd_remote_demo(args: &[String]) -> i32 {
+    // `--cover` with no number means F12's interval, because the default has to be
+    // the real one. A number after it is for watching the mechanism without waiting
+    // out a quarter of an hour — it is a demo knob, not a deployment one: a shorter
+    // interval narrows the window an observer has to average over.
+    let cover = match args.iter().position(|a| a == "--cover") {
+        None => remote::Cover::Off,
+        Some(i) => match args.get(i + 1).map(|s| s.parse::<u64>()) {
+            None => remote::Cover::DEFAULT,
+            Some(Ok(secs)) => remote::Cover::Every(std::time::Duration::from_secs(secs)),
+            Some(Err(_)) => {
+                eprintln!("--cover takes a number of seconds, or nothing for the default");
+                return 2;
+            }
+        },
+    };
+    if let remote::Cover::Every(i) = cover {
+        println!("cover traffic on: one transmission every {}s.", i.as_secs());
+        println!("this will take a while, which is the cost being demonstrated.\n");
+    }
+    let started = std::time::Instant::now();
     let mut rng = OsRandom;
     let (k, c, i) = build_services(&mut rng);
     let (tls, pin) = server_tls().expect("server identity");
@@ -212,11 +238,17 @@ fn cmd_remote_demo() -> i32 {
     println!("pinned to  {}\n", pin.to_hex());
 
     let conn = |who: &str| {
-        remote::Remote::connect(
+        // Tor off: this demo has no proxy to reach. Said explicitly, because a
+        // default that quietly does less than the setting claims is the failure
+        // `Spark-build-notes.md` §1 names.
+        remote::Remote::connect_via(
             &kl.addr.to_string(),
             &cl.addr.to_string(),
             &il.addr.to_string(),
             &[pin],
+            spark_transport::Mode::AlwaysOff,
+            cover,
+            ("127.0.0.1".into(), 9050),
         )
         .unwrap_or_else(|e| panic!("{who} could not connect: {e}"))
     };
@@ -261,9 +293,37 @@ fn cmd_remote_demo() -> i32 {
         }
         println!();
     }
+    let services = alice.services();
+    println!("how that traffic was routed:");
+    for h in services.ledger().hops() {
+        println!(
+            "    {:<8} {}:{}  {}",
+            format!("{:?}", h.class),
+            h.host,
+            h.port,
+            if h.via_tor { "over Tor" } else { "direct" }
+        );
+    }
+    let (text, media) = services.content_calls();
+    println!("\n    {text} chunk request(s) on the text connection, {media} on the media one");
+    let slots = services.cover_slots();
+    if slots > 0 {
+        println!(
+            "    {slots} paced transmission(s), every one the same size, in {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+        println!("    (media is never paced: a slower photo is a photo that never arrives)");
+    } else {
+        println!("    0 paced transmissions — cover traffic was off, so the timing of");
+        println!("    every request above says when there was something to say");
+    }
     println!(
-        "All of that crossed a TCP socket as WebSocket binary frames in the\n\
-              format of docs/protocol.md §6."
+        "\nAll of that crossed a TCP socket, inside TLS pinned to that key, as\n\
+         WebSocket binary frames in the format of docs/protocol.md §6.\n\
+         \n\
+         Tor is off here — there is no proxy to reach. The default mode routes\n\
+         control and text through one and leaves media direct, which is why the\n\
+         content service gets two connections rather than one."
     );
     0
 }

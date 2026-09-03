@@ -20,7 +20,9 @@
 
 pub mod services;
 
-pub use services::{Auth, ContentService, IssuerService, KeyringService, ServiceError, Services};
+pub use services::{
+    Auth, Class, ContentService, IssuerService, KeyringService, ServiceError, Services,
+};
 
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
@@ -143,6 +145,16 @@ impl<S: Services> Client<S> {
         c.load_keyring()?;
         c.load_mls()?;
         Ok(c)
+    }
+
+    /// The services this client talks to.
+    ///
+    /// Exposed so a caller can inspect what its transport actually did — the
+    /// connection ledger, the per-class request counts. Claims about routing are
+    /// claims about behaviour, and behaviour that cannot be observed cannot be
+    /// tested.
+    pub fn services(&self) -> &S {
+        &self.services
     }
 
     /// This account's address, which is all any server ever sees of it.
@@ -272,6 +284,20 @@ impl<S: Services> Client<S> {
         s
     }
 
+    /// The traffic class a chunk's requests belong to.
+    ///
+    /// Room history is text and goes over Tor in the default mode; media is bulk
+    /// and goes direct. This is the one place the two are told apart, so it is
+    /// worth reading next to `Spark-spec.md` D2's cost: a direct media fetch ties
+    /// an IP to a content-derived chunk name, and therefore to identifiable
+    /// content.
+    fn traffic_class(c: ChunkClass) -> Class {
+        match c {
+            ChunkClass::RoomLog => Class::Text,
+            ChunkClass::Media => Class::Media,
+        }
+    }
+
     /// Draw one storage token and spend it on a chunk.
     fn upload<R: CryptoRng + ?Sized>(
         &mut self,
@@ -299,6 +325,7 @@ impl<S: Services> Client<S> {
         let spendable = spark_tokens::finish(&pk, w, &sigs).map_err(|_| ClientError::Corrupt)?;
 
         let receipt = self.services.content().put(
+            Self::traffic_class(class),
             name.as_bytes(),
             chunk.as_bytes(),
             spendable[0].claim,
@@ -567,7 +594,7 @@ impl<S: Services> Client<S> {
                 while misses < probe_ahead.max(1) {
                     let slot = Slot::new(lane, seq);
                     let name = room::name(&root, slot);
-                    match self.services.content().get(name.as_bytes())? {
+                    match self.services.content().get(Class::Text, name.as_bytes())? {
                         Some(bytes) => {
                             misses = 0;
                             let chunk =
@@ -628,7 +655,7 @@ impl<S: Services> Client<S> {
         let bytes = self
             .services
             .content()
-            .get(name.as_bytes())?
+            .get(Class::Media, name.as_bytes())?
             .ok_or(ClientError::Service(ServiceError::NotFound))?;
         let chunk = Chunk::from_bytes(bytes).map_err(|_| ClientError::Corrupt)?;
         Ok(spark_chunk::media::open(&chunk, key)

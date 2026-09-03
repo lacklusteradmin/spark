@@ -76,6 +76,28 @@ impl<S: Read + Write> Channel<S> {
         }
     }
 
+    /// Send raw bytes as one binary message.
+    ///
+    /// For [`crate::paced`], which puts a cover frame on the wire rather than a
+    /// protocol frame: under cover traffic the unit of transmission is the slot,
+    /// and the protocol frame rides inside it.
+    pub fn send_raw(&mut self, bytes: &[u8]) -> Result<(), ChannelError> {
+        self.ws
+            .send(tungstenite::Message::Binary(bytes.to_vec().into()))
+            .map_err(|_| ChannelError::Closed)
+    }
+
+    /// Read one binary message as raw bytes.
+    pub fn recv_raw(&mut self) -> Result<Vec<u8>, ChannelError> {
+        loop {
+            match self.ws.read().map_err(|_| ChannelError::Closed)? {
+                tungstenite::Message::Binary(b) => return Ok(b.to_vec()),
+                tungstenite::Message::Close(_) => return Err(ChannelError::Closed),
+                _ => continue,
+            }
+        }
+    }
+
     /// Write one frame.
     pub fn send(&mut self, f: &Frame) -> Result<(), ChannelError> {
         self.ws

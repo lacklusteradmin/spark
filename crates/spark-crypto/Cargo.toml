@@ -22,6 +22,12 @@ subtle = { version = "2", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hmac = { version = "0.12", default-features = false }
 blind-rsa-signatures = "0.17"
+# The constant-time bignum. Used for exactly one thing — the private-key
+# exponentiation in `blind::IssuerKey::blind_sign` — because the `rsa` crate that
+# `blind-rsa-signatures` would otherwise use for it is not constant-time
+# (RUSTSEC-2023-0071, the Marvin Attack). Already in the graph either way: `rsa`
+# itself depends on it, which is how RustCrypto intends to fix that advisory.
+crypto-bigint = { version = "0.7", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]

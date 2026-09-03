@@ -131,3 +131,117 @@ fn a_public_key_round_trips_for_distribution() {
         .unwrap();
     assert!(issuer.public().verify(&token, b"m").is_ok());
 }
+
+/// The Marvin fix, held to account.
+///
+/// `blind_sign` no longer calls `blind-rsa-signatures`, because that call routes
+/// the private exponentiation through the `rsa` crate, which is not constant-time
+/// (RUSTSEC-2023-0071). It does the exponentiation itself against a constant-time
+/// bignum instead. The obvious risk in doing that is getting the arithmetic subtly
+/// wrong, so: the same key, the same blinded message, both implementations, and
+/// the bytes have to be equal.
+///
+/// Equality is the right assertion rather than "both verify". RSA signing is
+/// deterministic in `(m, d, n)` — the `rsa` crate's internal base blinding is
+/// undone before it returns — so any difference at all is a bug, and a test that
+/// only checked verification would pass on an implementation that agreed by
+/// accident on well-formed input and diverged on an edge.
+#[test]
+fn signing_matches_the_reference_implementation() {
+    use blind_rsa_signatures as brs;
+
+    let issuer = IssuerKey::generate(&mut Fixed(7)).expect("key");
+    let pk = issuer.public();
+
+    // The reference implementation over the same key: `IssuerKey::generate` is a
+    // thin wrapper on this call, and the RNG is deterministic, so the same seed
+    // gives the same modulus and the same private exponent. The first assertion
+    // below would fail loudly if that ever stopped being true.
+    let reference: brs::KeyPair<brs::Sha384, brs::PSS, brs::Randomized> =
+        brs::KeyPair::generate(&mut Fixed(7), MODULUS_BITS).expect("reference key");
+    assert_eq!(
+        reference.pk.to_der().expect("their der"),
+        pk.to_der().expect("our der"),
+        "the two keys are not the same key, so comparing signatures proves nothing"
+    );
+
+    for (i, msg) in [b"a".as_slice(), b"", &[0xFF; 300]].iter().enumerate() {
+        let (blind_message, _b) = pk.blind(&mut Fixed(100 + i as u64), msg).expect("blind");
+
+        let ours = issuer.blind_sign(&blind_message).expect("ours");
+        let theirs = reference
+            .sk
+            .blind_sign(&blind_message)
+            .expect("reference")
+            .0;
+
+        assert_eq!(
+            ours, theirs,
+            "constant-time signing disagreed with the reference on message {i}"
+        );
+        assert_eq!(
+            ours.len(),
+            MODULUS_BITS / 8,
+            "signature was not modulus-length"
+        );
+    }
+}
+
+/// A signature whose leading byte is zero.
+///
+/// The one place a hand-rolled big-endian encoding goes wrong: `to_be_bytes` on a
+/// bignum drops leading zeroes, so a signature numerically smaller than 2^2040
+/// comes back short and every verifier rejects it. Roughly 1 in 256 signatures.
+/// Searched for rather than hoped for.
+#[test]
+fn a_short_signature_is_still_padded_to_the_modulus() {
+    let issuer = IssuerKey::generate(&mut Fixed(11)).expect("key");
+    let pk = issuer.public();
+
+    let mut found = false;
+    for i in 0..600u64 {
+        let (bm, b) = pk.blind(&mut Fixed(i), b"pad").expect("blind");
+        let sig = issuer.blind_sign(&bm).expect("sign");
+        assert_eq!(
+            sig.len(),
+            MODULUS_BITS / 8,
+            "signature {i} was not modulus-length"
+        );
+        if sig[0] == 0 {
+            found = true;
+            // And it still unblinds and verifies, which is what a truncated
+            // encoding would have broken.
+            let token = pk.finalize(b, &sig, b"pad").expect("finalize");
+            pk.verify(&token, b"pad").expect("verify");
+            break;
+        }
+    }
+    assert!(
+        found,
+        "no leading-zero signature turned up in 600 tries; the case went unchecked"
+    );
+}
+
+/// Input the signer must refuse.
+///
+/// Not a formality: `m >= n` has no unique signature, and a blinded message of the
+/// wrong length would be silently zero-extended into a different number.
+#[test]
+fn a_malformed_blinded_message_is_refused() {
+    let issuer = IssuerKey::generate(&mut Fixed(13)).expect("key");
+    let bytes = MODULUS_BITS / 8;
+
+    assert!(
+        issuer.blind_sign(&vec![0xAA; bytes - 1]).is_err(),
+        "short message signed"
+    );
+    assert!(
+        issuer.blind_sign(&vec![0xAA; bytes + 1]).is_err(),
+        "long message signed"
+    );
+    // All-ones is larger than any 2048-bit modulus.
+    assert!(
+        issuer.blind_sign(&vec![0xFF; bytes]).is_err(),
+        "a message above the modulus signed"
+    );
+}

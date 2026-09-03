@@ -10,7 +10,9 @@
 //! TLS, and `spark-transport` has the routing and the SOCKS5 but not the framing.
 //! A second implementation of this trait is the remaining work.
 
-use spark_client::{Auth, ContentService, IssuerService, KeyringService, ServiceError, Services};
+use spark_client::{
+    Auth, Class, ContentService, IssuerService, KeyringService, ServiceError, Services,
+};
 use spark_crypto::{IssuerKey, Secret, Token, TokenClaim};
 use spark_store::Db;
 
@@ -170,8 +172,13 @@ impl KeyringService for Local {
 }
 
 impl ContentService for Local {
+    /// The traffic class is ignored: there is no network here to route over. It
+    /// is still in the signature so that this and the networked implementation
+    /// present the same surface to the client, which is what makes running the
+    /// same tests against both meaningful.
     fn put(
         &self,
+        _class: Class,
         name: &[u8; 32],
         chunk: &[u8],
         claim: TokenClaim,
@@ -187,14 +194,19 @@ impl ContentService for Local {
             _ => Err(ServiceError::Refused),
         }
     }
-    fn get(&self, name: &[u8; 32]) -> Result<Option<Vec<u8>>, ServiceError> {
+    fn get(&self, _class: Class, name: &[u8; 32]) -> Result<Option<Vec<u8>>, ServiceError> {
         match self.content.handle(content::Request::Get { name: *name }) {
             content::Response::Chunk(b) => Ok(Some(b)),
             content::Response::Refused(content::Refusal::NotFound) => Ok(None),
             _ => Err(ServiceError::Refused),
         }
     }
-    fn release(&self, name: &[u8; 32], receipt: &[u8; 32]) -> Result<Vec<u8>, ServiceError> {
+    fn release(
+        &self,
+        _class: Class,
+        name: &[u8; 32],
+        receipt: &[u8; 32],
+    ) -> Result<Vec<u8>, ServiceError> {
         match self.content.handle(content::Request::Release {
             name: *name,
             receipt: *receipt,

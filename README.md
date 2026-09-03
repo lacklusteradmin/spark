@@ -15,7 +15,7 @@ A private, phone-number-free messenger that does one thing: chat.
 the UniFFI bindings, which carry no logic of their own.
 
 ```bash
-cargo test --workspace                    # 211 tests
+cargo test --workspace                    # 220 tests
 scripts/verify-reproducible.sh            # 193 artifacts byte-identical across two builds
 cargo run -p spark-cli -- demo            # two accounts in one process, and what the servers kept
 cargo run -p spark-cli -- remote-demo     # the same, over real sockets
@@ -277,6 +277,29 @@ people enable makes those people a recognisable group. A test pins the daily cos
 at roughly 5.6 MB, so shrinking the interval for latency has to be a decision
 rather than a side effect.
 
+The schedule is wired into the real client, not only into the scheduler: `Remote`
+takes a `Cover` the same way it takes a `Mode`, and `spark remote-demo --cover`
+runs the whole conversation on it. Two things follow from having done this on a
+live connection rather than in a harness:
+
+The **server** answers one uniform frame for every frame it receives, including
+dummies. Silence in reply to a dummy would make dummies recognisable, which is the
+client's whole cadence undone from the other end — a connection is paced or not,
+decided by whether its first message is exactly one cover frame, so a peer cannot
+switch mid-session.
+
+Only the **first** transmission is special: the TLS handshake and the WebSocket
+upgrade are not padded and do not need to be, because they happen once per
+connection whether or not it goes on to say anything. `cover_traffic.rs` drops
+that prefix deliberately and says so, rather than filtering by size — a size
+filter would also hide a short frame, which is the failure the test is for.
+
+It is **off by default**, and that is a real cost rather than a formality: at F12's
+minute, every request waits up to a minute. `Remote::cover_slots()` exists so the
+setting can be checked from outside — without it, a `Cover` that was accepted and
+then dropped on the floor passes every test, since a paced session and an unpaced
+one deliver the same messages.
+
 ## Metadata stripping
 
 `scrub` returns an error for any format it cannot fully account for, and
@@ -348,6 +371,26 @@ Making it async would have meant the SOCKS5 negotiation knowing about a runtime,
 and the traffic-class routing decision leaking into every layer above it. The cost
 is a thread per connection, which for a first server is the right trade.
 
+## Routing, and where it is actually applied
+
+Every connection the client makes goes through `Transport`, which decides direct
+or Tor from the traffic class and, if Tor, negotiates SOCKS5 on a circuit of its
+own. That sentence was not true until recently: the routing, the SOCKS5 and the
+traffic classes all existed and passed gate 9 while the real client called
+`TcpStream::connect`, so the Tor setting was a switch that did nothing. Gate 9 now
+holds of the *client* — `always_on_shows_zero_direct_connections_from_the_real_client`
+runs against a real SOCKS5 proxy.
+
+**The content service gets two connections.** Its requests fall on both sides of
+D2's default mode: room-log chunks are text and go over Tor, media is bulk and
+goes direct. One connection would force a single routing decision for both, and
+the mixed mode could not be offered at all.
+
+There is deliberately no constructor that picks a Tor mode for you. There was one,
+defaulting to the spec's default, and it is gone: how much goes over Tor is a
+decision, and an API that makes it silently is how it stopped being one the first
+time.
+
 ## TLS, and why not the WebPKI
 
 A browser must reach any site in the world, so it trusts a large set of issuers.
@@ -389,57 +432,79 @@ lane's arbitration point, and the backstop that makes derived room-chunk nonces
 safe); a duplicate upload is charged in full and answered identically to a fresh
 one; media is freed at zero holders while room chunks are deleted outright.
 
-## Known risk: RUSTSEC-2023-0071
+## RUSTSEC-2023-0071, and what was done about it
 
 **The Marvin Attack.** The `rsa` crate's modular exponentiation is not
-constant-time, so an attacker who can time private-key operations over the
-network may recover the key. Spark performs that operation on two servers: the
-keyring service blind-signs storage tokens, and the issuer blind-signs name
-vouchers. Recovering either key means minting them for free, which removes the
-economic floor `Spark-spec.md` D1 depends on.
+constant-time, so an attacker who can time private-key operations over the network
+may recover the key. Spark performs that operation on two servers: the keyring
+service blind-signs storage tokens, and the issuer blind-signs name vouchers.
+Recovering either key means minting them for free, which removes the economic
+floor `Spark-spec.md` D1 depends on. The advisory still reads `patched = []`, and
+names exactly one workaround: *avoid using the crate where attackers can observe
+timing.* Two of our servers did precisely that, on input the attacker chose.
 
-It arrives through `blind-rsa-signatures` -> `rsa`. The advisory has no patched
-version (`patched = []`), and `rsa`'s latest release is a release candidate.
+**The private-key operation no longer goes through it.** RFC 9474 §5 blind signing
+is `s = m^d mod n` and nothing else — the message arrives already PSS-encoded by
+the client, so there is no padding step on the signer's side and no branch that
+could depend on the key. That one exponentiation is now done against
+`crypto-bigint`'s constant-time modular exponentiation: a fixed 4-bit window,
+unconditional squarings, and a branch-free sweep across all sixteen table entries
+for every lookup. No secret-dependent branch and no secret-dependent memory index.
+`crypto-bigint` is not an outside bet — it is already in the graph because `rsa`
+depends on it, and migrating to it is how RustCrypto intends to fix this advisory.
 
-**What is already true.** Base blinding *is* applied on every signature —
-`blind_sign_with_rng` passes an RNG and `rsa` randomises the base when given one.
-That is the classical defence against this class of attack, and it is why the
-advisory's CVSS says attack complexity is high
-(`AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N`). It is a mitigation, not a proof.
+**Why this is not the custom cryptography `Spark-build-notes.md` §1 forbids.** An
+earlier version of this section rejected "build RFC 9474 on a constant-time RSA",
+and that rejection stands: the scheme is subtle and reimplementing it would trade
+one timing bug for a class of protocol bugs. This is a much smaller thing.
+Everything protocol-shaped — PSS encoding, blinding, unblinding, verification, the
+DER forms — is still `blind-rsa-signatures`, untouched, and none of it handles a
+secret. What was replaced is a single arithmetic identity whose correctness is
+fully decidable by comparison: `signing_matches_the_reference_implementation`
+signs the same messages with the same key both ways and requires the bytes to be
+equal. RSA signing is deterministic in `(m, d, n)`, so any difference at all is a
+bug. Two edges that comparison alone would not have reached are tested directly: a
+signature with a leading zero byte, which a naive big-endian encoding truncates
+(about 1 in 256, so it is searched for rather than waited for), and a blinded
+message at or above the modulus, which has no unique signature.
 
-**What Spark does about it**, since the library cannot yet be fixed:
+Every signature is also re-encrypted under the public exponent and compared to the
+input, as the reference does: it turns a fault — injected, or mine — into a refused
+request rather than a signature that leaks. That check runs through a *variable*-time
+ladder bounded by `e`'s 17 bits, because `e` ships in the public key and hiding it
+would double the cost of signing. Measured: 3.1ms per signature in release, against
+6.1ms when the check was constant-time too, and a 50ms pacing tick to fit inside.
+Deleting the check breaks no test, which is correct — a fault detector is inert on
+correct input.
 
-* **Responses go out on a fixed cadence** (`spark-crypto::pace`). The service
-  emits its answer on a tick boundary rather than as soon as the work finishes,
-  so the measurable duration does not vary with the input, whatever the library
-  underneath does. It wraps the whole request path — pacing the signature while
-  the surrounding parse and database write vary would leave the variance intact.
-  Work exceeding a tick is *counted*, not hidden, because past that point the
-  number of ticks varies and the channel is back, coarsened.
-* **The signing keys rotate** (`spark-crypto::KeySet`). A recovered key mints only
-  until the next rotation. The retired key stays verifiable for one more period,
-  so rotating does not invalidate tokens people are already holding — otherwise
-  nobody would ever rotate.
+Having two exponentiation paths is itself a hazard, since they take the same
+arguments and swapping them changes no test result, only the timing. So the
+invariant below also pins both directions: exactly one variable-time call, with
+`&e` as its exponent, and the private path left unbounded.
 
-**Why not a different construction.** Spark's tokens must be publicly verifiable:
-the keyring service issues and the content service verifies, and they are
-deliberately separate trust domains. That rules out VOPRF- and Privacy-Pass-style
-constructions, where verifying needs the secret key — using one would mean handing
-the content service the issuer's secret, collapsing exactly the separation the
-design rests on. Blind Schnorr is unsafe under concurrent signing (the ROS
-attack), and a token issuer signs concurrently by definition. Blind BLS and BBS+
-are publicly verifiable but have far less audited Rust. **The construction is
-right; the implementation is the problem.**
+**What is enforced, not just claimed.** `blind-rsa-signatures` is still a
+dependency and therefore `rsa` is still in the graph, so `cargo-deny` still has to
+be told about the advisory. What makes that ignore honest is
+`no_secret_key_operation_goes_through_the_unpatched_rsa_crate`, which reads
+`blind.rs` and fails if anything but `components()` is ever called on the library's
+secret key. Reintroducing the vulnerable path is one line, it is *shorter* than
+what replaced it, and it produces identical bytes — so every other test in the
+workspace would still pass. A dependency-graph check cannot see that; a source
+check can.
 
-Building RFC 9474 ourselves on top of a constant-time RSA from OpenSSL or
-aws-lc-rs was considered and rejected: that is the custom cryptography
-`Spark-build-notes.md` §1 forbids, and it would trade one timing bug for a whole
-class of implementation bugs.
+**The pacing stays, with a different job.** `spark-crypto::pace` still emits
+responses on a tick boundary and `KeySet` still rotates the signing keys. That was
+the Marvin control; it is now defence in depth. It still earns its place, because
+the private-key exponentiation was never the only thing whose duration varied —
+quota checks, serial lookups and database writes vary with account state, and
+pacing wraps the whole request path rather than the signature alone.
 
-**Still open.** When `rsa` lands a constant-time implementation, the pacing
-becomes defence in depth rather than the control, and this section can shrink to a
-version bump. Until then the mitigations above are what stands between a recovered
-key and free storage.
+**What is left.** Key *generation* still runs inside `rsa` — prime search and
+computing `d`. That is not a Marvin exposure: it happens once, at server setup,
+offline, with no attacker-chosen input and no response to time. `IssuerKey` has no
+`from_der`, so a private key never re-enters the library by any other route. The
+remaining residual is that `crypto-bigint`'s constant-time claim is a design
+property backed by code review, not a machine-checked proof.
 
 ## Setup
 

@@ -15,7 +15,7 @@ mod remote;
 #[allow(dead_code)]
 mod serve;
 
-use remote::Remote;
+use remote::{Cover, Remote};
 use spark_client::Client;
 use spark_crypto::{IssuerKey, Mnemonic, Secret};
 use spark_store::Db;
@@ -86,12 +86,141 @@ fn deployment() -> Deployment {
 }
 
 impl Deployment {
+    /// Connect with Tor off.
+    ///
+    /// Explicit, because the *default* is `TextOverTor` and there is no Tor here.
+    /// Defaulting these tests to "off" inside the client would be the failure
+    /// `Spark-build-notes.md` §1 names: a privacy setting that quietly does less
+    /// than it says. Better that the test states what it is not using.
     fn connect(&self) -> std::io::Result<Remote> {
-        Remote::connect(&self.keyring, &self.content, &self.issuer, &[self.pin])
+        self.connect_with(&[self.pin])
     }
     fn connect_with(&self, pins: &[spark_transport::Pin]) -> std::io::Result<Remote> {
-        Remote::connect(&self.keyring, &self.content, &self.issuer, pins)
+        Remote::connect_via(
+            &self.keyring,
+            &self.content,
+            &self.issuer,
+            pins,
+            spark_transport::Mode::AlwaysOff,
+            Cover::Off,
+            ("127.0.0.1".into(), 0),
+        )
     }
+    /// Connect with cover traffic on.
+    ///
+    /// A short interval, not F12's minute: this runs a whole session, and the
+    /// claim under test is that pacing carries real traffic correctly, not how
+    /// long a slot is. `crates/spark-cli/tests/cover_traffic.rs` is what checks
+    /// what the pacing actually hides.
+    fn connect_paced(&self) -> std::io::Result<Remote> {
+        Remote::connect_via(
+            &self.keyring,
+            &self.content,
+            &self.issuer,
+            &[self.pin],
+            spark_transport::Mode::AlwaysOff,
+            Cover::Every(std::time::Duration::from_millis(1)),
+            ("127.0.0.1".into(), 0),
+        )
+    }
+    /// Connect through `proxy`, with everything over Tor.
+    fn connect_via_tor(&self, proxy: (String, u16)) -> std::io::Result<Remote> {
+        Remote::connect_via(
+            &self.keyring,
+            &self.content,
+            &self.issuer,
+            &[self.pin],
+            spark_transport::Mode::AlwaysOn,
+            Cover::Off,
+            proxy,
+        )
+    }
+}
+
+/// What the proxy was asked for: `(isolation token, destination)` per connection.
+type ProxyLog = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+/// A SOCKS5 proxy, enough of one to stand in for Tor.
+///
+/// Real enough to matter: it insists on username/password (which is how Tor gives
+/// each request its own circuit), reads the destination as a *name*, resolves it
+/// itself, and records what it was asked for. A test against a proxy that skipped
+/// any of that would not be testing the thing that goes wrong.
+fn socks5_proxy() -> (u16, ProxyLog) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen: ProxyLog = Default::default();
+    let log = seen.clone();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut c) = stream else { break };
+            let log = log.clone();
+            std::thread::spawn(move || {
+                // Greeting: the client must offer username/password (0x02).
+                let mut g = [0u8; 2];
+                if c.read_exact(&mut g).is_err() || g[0] != 5 {
+                    return;
+                }
+                let mut methods = vec![0u8; g[1] as usize];
+                if c.read_exact(&mut methods).is_err() || !methods.contains(&0x02) {
+                    let _ = c.write_all(&[5, 0xFF]);
+                    return;
+                }
+                let _ = c.write_all(&[5, 0x02]);
+
+                // RFC 1929: the username is the isolation token.
+                let mut h = [0u8; 2];
+                if c.read_exact(&mut h).is_err() {
+                    return;
+                }
+                let mut user = vec![0u8; h[1] as usize];
+                if c.read_exact(&mut user).is_err() {
+                    return;
+                }
+                let mut pl = [0u8; 1];
+                let _ = c.read_exact(&mut pl);
+                let mut pw = vec![0u8; pl[0] as usize];
+                let _ = c.read_exact(&mut pw);
+                let _ = c.write_all(&[1, 0]);
+
+                // CONNECT, by domain name.
+                let mut r = [0u8; 4];
+                if c.read_exact(&mut r).is_err() || r[1] != 1 || r[3] != 3 {
+                    return;
+                }
+                let mut l = [0u8; 1];
+                let _ = c.read_exact(&mut l);
+                let mut host = vec![0u8; l[0] as usize];
+                let _ = c.read_exact(&mut host);
+                let mut p = [0u8; 2];
+                let _ = c.read_exact(&mut p);
+                let host = String::from_utf8_lossy(&host).into_owned();
+                let port = u16::from_be_bytes(p);
+
+                log.lock().unwrap().push((
+                    String::from_utf8_lossy(&user).into_owned(),
+                    format!("{host}:{port}"),
+                ));
+
+                let Ok(upstream) = std::net::TcpStream::connect((host.as_str(), port)) else {
+                    let _ = c.write_all(&[5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+                    return;
+                };
+                let _ = c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+
+                // Pump both ways until either end closes.
+                let (mut a, mut b) = (c.try_clone().unwrap(), upstream.try_clone().unwrap());
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut a, &mut b);
+                });
+                let (mut a, mut b) = (upstream, c);
+                let _ = std::io::copy(&mut a, &mut b);
+            });
+        }
+    });
+    (port, seen)
 }
 
 fn phrase(e: u8) -> Mnemonic {
@@ -308,7 +437,18 @@ fn a_pin_round_trips_through_its_written_form() {
     assert_eq!(hex.len(), 64);
     assert_eq!(spark_transport::Pin::parse(&hex).unwrap(), id.pin);
     assert!(spark_transport::Pin::parse("too short").is_err());
-    assert!(spark_transport::Pin::parse(&hex.replace('a', "zz")).is_err());
+
+    // Right length, wrong alphabet. Written against a fixed position rather than
+    // `replace('a', ..)`, which was the previous version: the pin is a fresh random
+    // key each run, so a hex without an 'a' in it left the string untouched and
+    // still valid, and the test passed or failed by luck.
+    let mut wrong = hex.clone();
+    wrong.replace_range(0..1, "z");
+    assert_eq!(wrong.len(), 64);
+    assert!(spark_transport::Pin::parse(&wrong).is_err());
+
+    // And length alone is not enough to reject on.
+    assert!(spark_transport::Pin::parse(&hex[..63]).is_err());
 }
 
 #[test]
@@ -334,5 +474,208 @@ fn renewing_a_certificate_over_the_same_key_keeps_the_pin() {
         spark_transport::Pin::of(first.der()).unwrap(),
         spark_transport::Pin::of(second.der()).unwrap(),
         "renewal changed the pin"
+    );
+}
+
+#[test]
+fn always_on_shows_zero_direct_connections_from_the_real_client() {
+    // Gate 9's claim, made true of the *client* rather than of the routing layer in
+    // isolation. Before the client went through `Transport`, this passed for
+    // `spark-transport` while the client connected straight out — so the Tor
+    // setting was a switch that did nothing.
+    let d = deployment();
+    let (proxy_port, seen) = socks5_proxy();
+    let r = d
+        .connect_via_tor(("127.0.0.1".into(), proxy_port))
+        .expect("connect over the proxy");
+
+    assert!(
+        r.ledger().direct().is_empty(),
+        "a connection escaped Tor: {:?}",
+        r.ledger().direct()
+    );
+    assert_eq!(
+        r.ledger().hops().len(),
+        4,
+        "expected one hop per service connection"
+    );
+
+    // The proxy saw every destination as a *name*, and each connection presented
+    // different isolation credentials — a separate circuit each.
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 4, "the proxy did not carry every connection");
+    let mut users: Vec<&String> = seen.iter().map(|(u, _)| u).collect();
+    users.sort();
+    let n = users.len();
+    users.dedup();
+    assert_eq!(users.len(), n, "two connections shared a circuit");
+
+    // And the client still works through it.
+    let mut rng = Fixed(9);
+    let mut a = Client::from_mnemonic(&phrase(1), r).unwrap();
+    let room = a.create_room(&mut rng, "over tor").unwrap();
+    a.send(&mut rng, room, b"routed").unwrap();
+    let seen: Vec<String> = a
+        .sync(room, 3)
+        .unwrap()
+        .into_iter()
+        .map(|m| String::from_utf8(m.body).unwrap())
+        .collect();
+    assert_eq!(seen, ["routed"]);
+}
+
+#[test]
+fn the_default_mode_sends_media_direct_and_everything_else_over_tor() {
+    // D2's default, and its cost: a direct media fetch ties an IP to a
+    // content-derived chunk name, and therefore to identifiable content. That is
+    // accepted, not overlooked — but it has to actually be *only* media.
+    let d = deployment();
+    let (proxy_port, _) = socks5_proxy();
+    let r = Remote::connect_via(
+        &d.keyring,
+        &d.content,
+        &d.issuer,
+        &[d.pin],
+        spark_transport::Mode::TextOverTor,
+        Cover::Off,
+        ("127.0.0.1".into(), proxy_port),
+    )
+    .expect("connect");
+
+    let direct = r.ledger().direct();
+    assert_eq!(
+        direct.len(),
+        1,
+        "expected exactly one direct hop, got {direct:?}"
+    );
+    assert_eq!(
+        direct[0].class,
+        spark_transport::Class::Media,
+        "something other than media went direct"
+    );
+}
+
+#[test]
+fn a_room_message_and_a_photo_go_on_different_connections() {
+    // The claim the ledger cannot check: "media goes direct" is about *requests*,
+    // and both content connections point at the same address, so counting
+    // connections proves nothing about which one carried what. Routing every chunk
+    // over one connection passed every other test here.
+    //
+    // The dangerous direction is not media taking the slow path — it is a room
+    // message taking the media connection, which in the default mode goes direct.
+    let d = deployment();
+    let r = d.connect().unwrap();
+    let mut rng = Fixed(9);
+
+    let mut a = Client::from_mnemonic(&phrase(1), r).unwrap();
+    let room = a.create_room(&mut rng, "r").unwrap();
+    a.send(&mut rng, room, b"a room message").unwrap();
+    let (text_after_message, media_after_message) = a.services().content_calls();
+    assert!(
+        text_after_message > 0,
+        "a room message did not use the text connection"
+    );
+    assert_eq!(
+        media_after_message, 0,
+        "a room message used the media connection"
+    );
+
+    // A JPEG, which must take the other one.
+    let mut photo = vec![0xFF, 0xD8];
+    photo.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
+    photo.extend_from_slice(b"PIXELDATA");
+    photo.extend_from_slice(&[0xFF, 0xD9]);
+    a.share_file(&mut rng, room, &photo).unwrap();
+
+    let (text, media) = a.services().content_calls();
+    assert_eq!(media, 1, "a photo did not use the media connection");
+    assert_eq!(
+        text, text_after_message,
+        "a photo also touched the text connection"
+    );
+}
+
+#[test]
+fn a_paced_client_holds_a_whole_conversation() {
+    // The point of this one is that `Cover` is reachable at all. `Transport` spent
+    // three stages passing its own tests while the real client connected straight
+    // out; cover traffic could have gone the same way — a module, a gate, and no
+    // caller. So: the full session, over paced connections, through the network.
+    let d = deployment();
+    let mut rng = Fixed(9);
+
+    let mut alice = Client::from_mnemonic(
+        &Mnemonic::from_entropy(&[11; 32]),
+        d.connect_paced().expect("alice"),
+    )
+    .expect("alice");
+    let mut bob = Client::from_mnemonic(
+        &Mnemonic::from_entropy(&[12; 32]),
+        d.connect_paced().expect("bob"),
+    )
+    .expect("bob");
+
+    let room = alice.create_room(&mut rng, "paced").expect("room");
+    let kp = bob.key_package().expect("key package");
+    let inv = alice.invite(&mut rng, room, &kp).expect("invite");
+    bob.accept(&mut rng, &inv, "paced").expect("accept");
+
+    alice
+        .send(&mut rng, room, b"through the cover")
+        .expect("send");
+    let got: Vec<String> = bob
+        .sync(room, 4)
+        .expect("sync")
+        .into_iter()
+        .map(|m| String::from_utf8(m.body).unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        ["through the cover"],
+        "a paced client could not carry a real message"
+    );
+
+    // And media, which is never paced whatever `cover` said: `Hysteria::enqueue`
+    // refuses the class outright, so a paced media connection could not carry
+    // anything at all. Sharing a file is what shows that the exception is real
+    // rather than a comment.
+    let mut photo = vec![0xFF, 0xD8];
+    photo.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
+    photo.extend_from_slice(b"PIXELDATA");
+    photo.extend_from_slice(&[0xFF, 0xD9]);
+    alice
+        .share_file(&mut rng, room, &photo)
+        .expect("a paced client could not share a file");
+
+    let (text, media) = alice.services().content_calls();
+    assert!(media > 0, "the media connection carried nothing");
+    assert!(text > 0, "the text connection carried nothing");
+
+    // And it was actually paced. Without this the test passes just as well when
+    // `Cover` is accepted and ignored, because a paced session and an unpaced one
+    // deliver the same messages — which is exactly how a routing setting that did
+    // nothing survived three stages here.
+    let before = alice.services().cover_slots();
+    assert!(before > 0, "the client was asked to pace and did not");
+
+    // And the count tracks transmissions rather than merely being paced: every
+    // request turns at least one slot, so three more must move it by at least
+    // three. A counter that reported a constant would satisfy `> 0` and prove
+    // nothing.
+    for _ in 0..3 {
+        alice.send(&mut rng, room, b"another").expect("send");
+    }
+    let after = alice.services().cover_slots();
+    assert!(
+        after >= before + 3,
+        "slots went {before} -> {after} across three requests"
+    );
+    let off = Client::from_mnemonic(&Mnemonic::from_entropy(&[13; 32]), d.connect().unwrap())
+        .expect("unpaced");
+    assert_eq!(
+        off.services().cover_slots(),
+        0,
+        "an unpaced client turned a slot"
     );
 }
