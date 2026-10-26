@@ -47,6 +47,55 @@ pub struct Blinding {
     pub(crate) inner: brs::BlindingResult,
 }
 
+#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct SavedSecret(Vec<u8>);
+impl SavedSecret {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+    fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Secret state for retrying exactly one blind-signature operation after a crash.
+/// Persist only inside authenticated encryption. Never log this value.
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SavedBlinding {
+    message: Vec<u8>,
+    secret: SavedSecret,
+    randomizer: [u8; 32],
+}
+
+impl Blinding {
+    /// Persist this operation's unblinding state inside the encrypted keyring.
+    pub fn save(&self) -> SavedBlinding {
+        SavedBlinding {
+            message: self.inner.blind_message.0.clone(),
+            secret: SavedSecret::new(self.inner.secret.0.clone()),
+            randomizer: self.inner.msg_randomizer.unwrap().0,
+        }
+    }
+}
+impl SavedBlinding {
+    /// Recreate the same operation, never a new issuance.
+    pub fn restore(&self) -> Blinding {
+        Blinding {
+            inner: brs::BlindingResult {
+                blind_message: brs::BlindMessage(self.message.clone()),
+                secret: brs::Secret(self.secret.expose().to_vec()),
+                msg_randomizer: Some(brs::MessageRandomizer(self.randomizer)),
+            },
+        }
+    }
+    /// Exact bytes required for an idempotent retry.
+    pub fn message(&self) -> &[u8] {
+        &self.message
+    }
+}
+
 /// A finished token: the signature and what is needed to verify it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -65,6 +114,16 @@ impl IssuerKey {
             .map_err(|_| BlindError::Crypto)
     }
 
+    /// Export the private issuer key for an operator-only durable vault.
+    pub fn secret_der(&self) -> Result<Vec<u8>, BlindError> {
+        self.0.sk.to_der().map_err(|_| BlindError::Crypto)
+    }
+    /// Restore a private issuer key from an operator-only vault.
+    pub fn from_secret_der(bytes: &[u8]) -> Result<Self, BlindError> {
+        let sk = brs::SecretKey::from_der(bytes).map_err(|_| BlindError::Crypto)?;
+        let pk = sk.public_key().map_err(|_| BlindError::Crypto)?;
+        Ok(Self(Kp { sk, pk }))
+    }
     /// The public half.
     pub fn public(&self) -> IssuerPublic {
         IssuerPublic(self.0.pk.clone())
@@ -327,6 +386,14 @@ pub struct TokenClaim {
 }
 
 impl TokenClaim {
+    /// Refund claims use a separate domain as well as a separate mint.
+    pub fn refund_message(&self) -> Vec<u8> {
+        let mut v = b"spark/v1/refund".to_vec();
+        v.extend_from_slice(&self.serial);
+        v.push(self.size_class);
+        v
+    }
+
     /// The smallest class that fits `bytes`.
     pub fn class_for(bytes: u64) -> u8 {
         let mut c = 10u8; // 1 KiB floor: nothing smaller is worth its own class
@@ -415,7 +482,15 @@ impl VoucherClaim {
             Grant::NameMonths { months, premium } => {
                 (if premium { 500 } else { 5 }) * months as u64
             }
-            Grant::Storage { size_class } => 1u64 << size_class.saturating_sub(20),
+            Grant::Storage {
+                size_class: 20..=40,
+            } => {
+                let Grant::Storage { size_class } = self.grant else {
+                    unreachable!()
+                };
+                1u64 << (size_class - 20)
+            }
+            Grant::Storage { .. } => 0,
         }
     }
 }
@@ -450,6 +525,43 @@ impl KeySet {
             previous: None,
             generation: 0,
         }
+    }
+
+    /// Serialize private and retired public key state for an operator-only vault.
+    pub fn secret_bytes(&self) -> Result<Vec<u8>, BlindError> {
+        let private = self.current.secret_der()?;
+        let previous = self
+            .previous
+            .as_ref()
+            .map(IssuerPublic::to_der)
+            .transpose()?
+            .unwrap_or_default();
+        let mut out = self.generation.to_be_bytes().to_vec();
+        out.extend_from_slice(&(private.len() as u32).to_be_bytes());
+        out.extend_from_slice(&private);
+        out.extend_from_slice(&previous);
+        Ok(out)
+    }
+    /// Restore a complete signing/verification generation from its private vault.
+    pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, BlindError> {
+        if bytes.len() < 8 || bytes.len() > 16384 {
+            return Err(BlindError::Crypto);
+        }
+        let generation = u32::from_be_bytes(bytes[..4].try_into().unwrap());
+        let len = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let private = bytes
+            .get(8..8usize.checked_add(len).ok_or(BlindError::Crypto)?)
+            .ok_or(BlindError::Crypto)?;
+        let previous = &bytes[8 + len..];
+        Ok(Self {
+            current: IssuerKey::from_secret_der(private)?,
+            previous: if previous.is_empty() {
+                None
+            } else {
+                Some(IssuerPublic::from_der(previous)?)
+            },
+            generation,
+        })
     }
 
     /// The key to sign with.

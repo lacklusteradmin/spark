@@ -124,10 +124,14 @@ fn a_request_reaches_the_tray_and_creates_no_room() {
         spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
     );
     let (alice, stranger) = (ident(1), ident(2));
+    ks.handle(keyring::Request::SetContacts(
+        auth(&ks, &alice),
+        vec![spark_crypto::sha256(&[11; 32])],
+    ));
 
     let sealed = seal_request(
         &alice.public().kem,
-        &stranger.public(),
+        &stranger,
         "we met at the docks",
         None,
         Secret::new([77; 32]),
@@ -136,7 +140,7 @@ fn a_request_reaches_the_tray_and_creates_no_room() {
         ks.handle(keyring::Request::PutRequest {
             addr: *alice.addr().as_bytes(),
             blob: sealed.as_bytes().to_vec(),
-            token: b"tok-1".to_vec(),
+            permit: vec![11; 32],
         }),
         keyring::Response::RequestTaken
     );
@@ -169,7 +173,7 @@ fn a_request_is_readable_only_by_its_recipient() {
     let (alice, stranger, eve) = (ident(1), ident(2), ident(3));
     let sealed = seal_request(
         &alice.public().kem,
-        &stranger.public(),
+        &stranger,
         "hello",
         None,
         Secret::new([5; 32]),
@@ -184,7 +188,7 @@ fn a_request_is_readable_only_by_its_recipient() {
     ks.handle(keyring::Request::PutRequest {
         addr: *alice.addr().as_bytes(),
         blob: sealed.as_bytes().to_vec(),
-        token: b"t".to_vec(),
+        permit: b"t".to_vec(),
     });
     let keyring::Response::Requests(eves) =
         ks.handle(keyring::Request::GetRequests(auth(&ks, &eve)))
@@ -207,7 +211,7 @@ fn an_invite_proves_it_was_handed_out() {
     let stranger = ident(2);
     let sealed = seal_request(
         &invite.kem,
-        &stranger.public(),
+        &stranger,
         "following your link",
         Some(invite.secret),
         Secret::new([6; 32]),
@@ -218,7 +222,7 @@ fn an_invite_proves_it_was_handed_out() {
     // the tray — the name path is legitimate — but is not marked invited.
     let guessed = seal_request(
         &invite.kem,
-        &stranger.public(),
+        &stranger,
         "guessing",
         Some([0xff; INVITE_SECRET_LEN]),
         Secret::new([7; 32]),
@@ -260,24 +264,28 @@ fn declining_tells_the_sender_nothing() {
         spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
     );
     let (alice, stranger) = (ident(1), ident(2));
+    ks.handle(keyring::Request::SetContacts(
+        auth(&ks, &alice),
+        vec![spark_crypto::sha256(&[11; 32])],
+    ));
     let sealed = seal_request(
         &alice.public().kem,
-        &stranger.public(),
+        &stranger,
         "hello",
         None,
         Secret::new([5; 32]),
     );
 
-    let send = |token: &[u8]| {
+    let send = |permit: &[u8]| {
         ks.handle(keyring::Request::PutRequest {
             addr: *alice.addr().as_bytes(),
             blob: sealed.as_bytes().to_vec(),
-            token: token.to_vec(),
+            permit: permit.to_vec(),
         })
     };
 
     // Before: accepted for delivery.
-    let before = send(b"t1");
+    let before = send(&[11; 32]);
     assert_eq!(before, keyring::Response::RequestTaken);
 
     // Alice declines: the request is simply discarded.
@@ -304,7 +312,7 @@ fn declining_tells_the_sender_nothing() {
         ks.handle(keyring::Request::PutRequest {
             addr: [0xde; 32],
             blob: sealed.as_bytes().to_vec(),
-            token: b"t3".to_vec(),
+            permit: b"t3".to_vec(),
         }),
         before,
         "a nonexistent address is distinguishable from a real one"

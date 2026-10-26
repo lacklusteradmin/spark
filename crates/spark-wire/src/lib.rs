@@ -147,6 +147,10 @@ impl core::error::Error for WireError {}
 /// Proof that the caller holds the key behind an address.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Auth {
+    /// Server-issued, time-bounded challenge.
+    pub challenge: [u8; 32],
+    /// Fresh request nonce, consumed once across all connections.
+    pub nonce: [u8; 32],
     /// The keyring address.
     pub addr: [u8; 32],
     /// The public key it was derived from.

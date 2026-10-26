@@ -38,12 +38,20 @@ pub enum Req {
         name: [u8; 32],
         /// The receipt issued at upload.
         receipt: [u8; 32],
+        /// Refund denomination, checked against the original receipt.
+        size_class: u8,
+        /// Client-blinded refund claim; the store cannot recognize the redeemed serial.
+        blinded: Vec<u8>,
     },
     /// Delete a room chunk outright, at dissolve.
     Delete {
         /// The chunk.
         name: [u8; 32],
+        /// Independent write capability, never derivable from the room read key.
+        receipt: [u8; 32],
     },
+    /// Obtain the public refund key for a denomination.
+    GetRefundKey(u8),
 }
 
 impl Operation for Req {
@@ -54,6 +62,7 @@ impl Operation for Req {
             Req::Head { .. } => 2,
             Req::Release { .. } => 3,
             Req::Delete { .. } => 4,
+            Req::GetRefundKey(_) => 5,
         }
     }
 }
@@ -81,6 +90,8 @@ pub enum Resp {
     Deleted,
     /// Refused.
     Refused(Refusal),
+    /// DER-encoded public refund key.
+    RefundKey(Vec<u8>),
 }
 
 impl Operation for Resp {
@@ -92,6 +103,7 @@ impl Operation for Resp {
             Resp::Released { .. } => 3,
             Resp::Deleted => 4,
             Resp::Refused(_) => 5,
+            Resp::RefundKey(_) => 6,
         }
     }
 }

@@ -26,6 +26,8 @@ pub struct Receipt(pub [u8; 32]);
 /// permanently, for its owner as much as for anyone else.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Generation {
+    /// Authenticated identity roster for this archive generation.
+    pub members: Vec<[u8; 32]>,
     /// The MLS epoch this generation corresponds to.
     pub epoch: u64,
     /// The archive secret every chunk name and key in this generation derives from.
@@ -139,4 +141,51 @@ pub struct HeldName {
     pub name: String,
     /// Days since the epoch, after which the 10-day grace period starts.
     pub paid_until_day: u32,
+}
+
+/// A user-approved contact. Keys and permits stay inside the encrypted keyring.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Contact {
+    /// Local display name.
+    pub name: String,
+    /// Authenticated signing identity.
+    pub sign: [u8; 32],
+    /// Recipient encryption key.
+    pub kem: [u8; 32],
+    /// Secret allowing this contact to write to our inbox.
+    pub receive_permit: [u8; 32],
+    /// Secret this contact gave us for their inbox.
+    pub send_permit: Option<[u8; 32]>,
+}
+
+/// Durable refund state; all fields live only in the encrypted keyring.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingRefund {
+    /// Original upload receipt.
+    pub receipt: Receipt,
+    /// Blind refund claim.
+    pub claim: spark_crypto::TokenClaim,
+    /// Verification key pinned at operation creation.
+    pub issuer: Vec<u8>,
+    /// Secret unblinding state for this exact operation.
+    pub blinding: spark_crypto::blind::SavedBlinding,
+}
+
+/// One upload journaled before withdrawing quota or writing content.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingUpload {
+    /// Chunk destination.
+    pub name: SerName,
+    /// Exact ciphertext to resend.
+    pub chunk: Vec<u8>,
+    /// Routing class.
+    pub class: ChunkClass,
+    /// Local room reference.
+    pub room: Option<RoomId>,
+    /// Token claim, hidden from the keyring server by blinding.
+    pub claim: spark_crypto::TokenClaim,
+    /// Pinned denomination key.
+    pub issuer: Vec<u8>,
+    /// Secret recovery state, inside the encrypted keyring only.
+    pub blinding: spark_crypto::blind::SavedBlinding,
 }

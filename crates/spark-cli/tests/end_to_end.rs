@@ -221,3 +221,282 @@ fn a_bad_recovery_phrase_is_refused_rather_than_making_a_new_account() {
         spark_client::ClientError::BadMnemonic
     );
 }
+
+#[test]
+fn contacts_require_mutual_approval_survive_restore_and_can_be_revoked() {
+    let services = deployment();
+    let mut rng = Fixed(903);
+    let mut a = Client::from_mnemonic(&phrase(31), &services).unwrap();
+    let mut b = Client::from_mnemonic(&phrase(32), &services).unwrap();
+    let b_public: [u8; 64] = [
+        b.public().sign.as_bytes().as_slice(),
+        b.public().kem.as_bytes(),
+    ]
+    .concat()
+    .try_into()
+    .unwrap();
+    let a_key = *a.public().sign.as_bytes();
+    let b_key = *b.public().sign.as_bytes();
+    assert!(b.contact_note(&mut rng, &a_key, "unsolicited").is_err());
+    let a_card = a.add_contact(&mut rng, "Bob", &b_public, None).unwrap();
+    let b_card = b
+        .add_contact(
+            &mut rng,
+            "Alice",
+            &a_card[..64].try_into().unwrap(),
+            Some(a_card[64..].try_into().unwrap()),
+        )
+        .unwrap();
+    a.add_contact(
+        &mut rng,
+        "Bob",
+        &b_card[..64].try_into().unwrap(),
+        Some(b_card[64..].try_into().unwrap()),
+    )
+    .unwrap();
+    b.contact_note(&mut rng, &a_key, "approved note").unwrap();
+    let mut restored = Client::from_mnemonic(&phrase(31), &services).unwrap();
+    assert_eq!(restored.contacts().len(), 1);
+    let notes = restored.contact_inbox().unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].note, "approved note");
+    assert_eq!(notes[0].from.sign, b.public().sign);
+    restored.remove_contact(&mut rng, &b_key).unwrap();
+    // The stale original device must not republish its old permit list.
+    assert!(a.remove_contact(&mut rng, &[0; 32]).is_err());
+    b.contact_note(&mut rng, &a_key, "old permit").unwrap();
+    assert!(restored.contact_inbox().unwrap().is_empty());
+    assert!(
+        Client::from_mnemonic(&phrase(31), &services)
+            .unwrap()
+            .contacts()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_real_client_redeems_a_refund_with_the_separate_content_mint() {
+    let services = deployment();
+    let mut rng = Fixed(904);
+    let mut a = Client::from_mnemonic(&phrase(33), &services).unwrap();
+    let room = a.create_room(&mut rng, "refund").unwrap();
+    let png = [0xff, 0xd8, 0xff, 0xda, 0, 2, 1, 2, 3, 0xff, 0xd9];
+    let (name, _) = a.share_file(&mut rng, room, &png).unwrap();
+    let before = a.bytes_held();
+    assert!(before > 0);
+    a.release_upload(&mut rng, name).unwrap();
+    assert_eq!(a.bytes_held(), 0);
+    assert!(a.release_upload(&mut rng, name).is_err());
+    assert_eq!(
+        Client::from_mnemonic(&phrase(33), &services)
+            .unwrap()
+            .bytes_held(),
+        0
+    );
+}
+
+use spark_client::services::{
+    Class, ContentService, IssuerService, KeyringService, ServiceError, Services,
+};
+use spark_crypto::{Token, TokenClaim};
+use std::cell::{Cell, RefCell};
+
+struct Faults<'a> {
+    local: &'a Local,
+    lose_put: Cell<bool>,
+    lose_release: Cell<bool>,
+    uploaded: RefCell<Vec<[u8; 32]>>,
+    hidden: RefCell<Vec<[u8; 32]>>,
+    substituted: RefCell<Option<Vec<u8>>>,
+}
+impl<'a> Faults<'a> {
+    fn new(local: &'a Local) -> Self {
+        Self {
+            local,
+            lose_put: Cell::new(false),
+            lose_release: Cell::new(false),
+            uploaded: RefCell::new(vec![]),
+            hidden: RefCell::new(vec![]),
+            substituted: RefCell::new(None),
+        }
+    }
+}
+impl Services for Faults<'_> {
+    fn keyring(&self) -> &dyn KeyringService {
+        self.local.keyring()
+    }
+    fn issuer(&self) -> &dyn IssuerService {
+        self.local.issuer()
+    }
+    fn content(&self) -> &dyn ContentService {
+        self
+    }
+}
+impl ContentService for Faults<'_> {
+    fn put(
+        &self,
+        class: Class,
+        name: &[u8; 32],
+        chunk: &[u8],
+        claim: TokenClaim,
+        token: &Token,
+    ) -> Result<[u8; 32], ServiceError> {
+        let receipt = self.local.content().put(class, name, chunk, claim, token)?;
+        self.uploaded.borrow_mut().push(*name);
+        if self.lose_put.replace(false) {
+            return Err(ServiceError::Unreachable);
+        }
+        Ok(receipt)
+    }
+    fn get(&self, class: Class, name: &[u8; 32]) -> Result<Option<Vec<u8>>, ServiceError> {
+        if let Some(bytes) = self.substituted.borrow().as_ref() {
+            return Ok(Some(bytes.clone()));
+        }
+        if self.hidden.borrow().contains(name) {
+            return Ok(None);
+        }
+        self.local.content().get(class, name)
+    }
+    fn refund_key(&self, class: Class, size_class: u8) -> Result<Vec<u8>, ServiceError> {
+        self.local.content().refund_key(class, size_class)
+    }
+    fn release(
+        &self,
+        class: Class,
+        name: &[u8; 32],
+        receipt: &[u8; 32],
+        size_class: u8,
+        blinded: &[u8],
+    ) -> Result<Vec<u8>, ServiceError> {
+        let sig = self
+            .local
+            .content()
+            .release(class, name, receipt, size_class, blinded)?;
+        if self.lose_release.replace(false) {
+            return Err(ServiceError::Unreachable);
+        }
+        Ok(sig)
+    }
+}
+
+#[test]
+fn stale_device_cannot_overwrite_newer_rooms() {
+    let s = deployment();
+    let mut rng = Fixed(100);
+    let mut a = Client::from_mnemonic(&phrase(1), &s).unwrap();
+    let mut stale = Client::from_mnemonic(&phrase(1), &s).unwrap();
+    let room = a.create_room(&mut rng, "preserved").unwrap();
+    assert!(stale.create_room(&mut rng, "stale overwrite").is_err());
+    let recovered = Client::from_mnemonic(&phrase(1), &s).unwrap();
+    assert_eq!(recovered.rooms(), vec![(room, "preserved".into())]);
+}
+
+const SMALL_JPEG: &[u8] = &[0xff, 0xd8, 0xff, 0xda, 0, 2, 1, 2, 3, 0xff, 0xd9];
+
+#[test]
+fn repeated_media_upload_retains_every_receipt_across_recovery() {
+    let s = deployment();
+    let mut rng = Fixed(101);
+    let mut a = Client::from_mnemonic(&phrase(1), &s).unwrap();
+    let room = a.create_room(&mut rng, "duplicates").unwrap();
+    let (name, key) = a.share_file(&mut rng, room, SMALL_JPEG).unwrap();
+    let once = a.bytes_held();
+    a.share_file(&mut rng, room, SMALL_JPEG).unwrap();
+    assert_eq!(a.bytes_held(), 2 * once);
+    drop(a);
+    let mut a = Client::from_mnemonic(&phrase(1), &s).unwrap();
+    a.release_upload(&mut rng, name).unwrap();
+    assert_eq!(a.bytes_held(), once);
+    assert!(a.fetch_file(name, &key).is_ok());
+    a.release_upload(&mut rng, name).unwrap();
+    assert_eq!(a.bytes_held(), 0);
+    assert!(a.fetch_file(name, &key).is_err());
+}
+
+#[test]
+fn lost_refund_response_is_recoverable_from_seed() {
+    let s = deployment();
+    let f = Faults::new(&s);
+    let mut rng = Fixed(102);
+    let mut a = Client::from_mnemonic(&phrase(1), &f).unwrap();
+    let room = a.create_room(&mut rng, "refund").unwrap();
+    let (name, _) = a.share_file(&mut rng, room, SMALL_JPEG).unwrap();
+    f.lose_release.set(true);
+    assert!(a.release_upload(&mut rng, name).is_err());
+    drop(a);
+    let mut recovered = Client::from_mnemonic(&phrase(1), &f).unwrap();
+    recovered.release_upload(&mut rng, name).unwrap();
+    assert_eq!(recovered.bytes_held(), 0);
+}
+
+#[test]
+fn lost_upload_response_is_recoverable_without_a_second_charge_or_message() {
+    let s = deployment();
+    let f = Faults::new(&s);
+    let mut rng = Fixed(103);
+    let mut a = Client::from_mnemonic(&phrase(1), &f).unwrap();
+    let room = a.create_room(&mut rng, "upload").unwrap();
+    f.lose_put.set(true);
+    assert!(a.send(&mut rng, room, b"once").is_err());
+    drop(a);
+    let mut recovered = Client::from_mnemonic(&phrase(1), &f).unwrap();
+    recovered.retry_pending_upload(&mut rng).unwrap();
+    assert_eq!(
+        recovered
+            .sync(room, 3)
+            .unwrap()
+            .iter()
+            .map(|m| m.body.as_slice())
+            .collect::<Vec<_>>(),
+        vec![b"once".as_slice()]
+    );
+    let held = recovered.bytes_held();
+    recovered.retry_pending_upload(&mut rng).unwrap();
+    assert_eq!(recovered.bytes_held(), held);
+}
+
+#[test]
+fn long_gaps_and_temporarily_hidden_older_messages_are_eventually_revisited() {
+    let s = deployment();
+    let f = Faults::new(&s);
+    let mut rng = Fixed(104);
+    let mut a = Client::from_mnemonic(&phrase(1), &f).unwrap();
+    let room = a.create_room(&mut rng, "gaps").unwrap();
+    for i in 0..6u8 {
+        a.send(&mut rng, room, &[i]).unwrap();
+    }
+    *f.hidden.borrow_mut() = f.uploaded.borrow()[..3].to_vec();
+    assert!(a.sync(room, 2).unwrap().is_empty());
+    assert_eq!(a.sync(room, 2).unwrap().len(), 3);
+    f.hidden.borrow_mut().clear();
+    for _ in 0..6 {
+        a.sync(room, 2).unwrap();
+    }
+    assert_eq!(
+        a.sync(room, 2)
+            .unwrap()
+            .iter()
+            .map(|m| m.body[0])
+            .collect::<Vec<_>>(),
+        (0..6).collect::<Vec<u8>>()
+    );
+}
+
+#[test]
+fn media_fetch_rejects_authenticated_ciphertext_at_the_wrong_address() {
+    let s = deployment();
+    let f = Faults::new(&s);
+    let mut rng = Fixed(107);
+    let mut a = Client::from_mnemonic(&phrase(1), &f).unwrap();
+    let room = a.create_room(&mut rng, "media integrity").unwrap();
+    let (name, key) = a.share_file(&mut rng, room, SMALL_JPEG).unwrap();
+    // A holder of the original convergent file knows its key. Even a valid
+    // AEAD under that key is not authority to replace this content address.
+    let replacement =
+        spark_chunk::Chunk::seal(spark_chunk::Kind::Media, &key, &[17; 24], b"replacement");
+    *f.substituted.borrow_mut() = Some(replacement.as_bytes().to_vec());
+    assert_eq!(
+        a.fetch_file(name, &key).unwrap_err(),
+        spark_client::ClientError::Corrupt
+    );
+}

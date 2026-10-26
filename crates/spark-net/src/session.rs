@@ -25,8 +25,39 @@ use crate::{Cover, Remote};
 use spark_client::{Client, ClientError, Invitation};
 use spark_crypto::blind::{TryCryptoRng, TryRng};
 use spark_keyring::RoomId;
+use spark_transport::push::{self, Consent, Setting};
 use spark_transport::{Mode, Pin};
 
+/// The warning an interface must show before push can be turned on.
+///
+/// The interface displays this and, if the user accepts, hands the same text
+/// back to [`Session::enable_push`]. It comes from here rather than from the
+/// app's own strings so that there is one wording, and so that strengthening it
+/// in a release reaches every interface that displays it.
+pub fn push_warning() -> &'static str {
+    push::ENABLE_WARNING
+}
+
+/// What leaving push off costs, to show alongside the warning.
+pub fn push_off_cost() -> &'static str {
+    push::OFF_COST
+}
+
+/// Whether this device may use push.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PushState {
+    /// Off, which is the default. Nothing is registered with Apple or Google.
+    Off,
+    /// On, after the user accepted the current warning.
+    On,
+    /// Off, because the user accepted a warning that has since changed.
+    ///
+    /// Distinct from `Off` so an interface can show the new wording and ask
+    /// again, rather than silently losing notifications the user chose to have.
+    /// Never treated as on: consent given to a warning that no longer describes
+    /// the risk is not consent to the risk as it now stands.
+    Stale,
+}
 /// The operating-system entropy source.
 ///
 /// The one place in the client's graph that draws rather than receives. Above it
@@ -83,6 +114,9 @@ pub enum SessionError {
     Unscrubbable,
     /// Anything the client refused that the caller cannot act on differently.
     Refused,
+    /// Push was not turned on, because the text passed back was not the current
+    /// warning. Show [`push_warning`] and pass back exactly what was shown.
+    WarningNotShown,
 }
 
 impl From<ClientError> for SessionError {
@@ -118,6 +152,19 @@ pub struct Config {
     pub cover_seconds: u64,
     /// `host:port` of the SOCKS5 proxy, used only when `tor` is not `"off"`.
     pub proxy: String,
+    /// The push warning this device's user accepted, exactly as it was shown, or
+    /// empty if they never turned push on.
+    ///
+    /// A device setting rather than an account one, so it lives with the app and
+    /// not in the keyring: each device mints its own token, possibly tied to a
+    /// different Apple or Google account, and consent on one device is not consent
+    /// on another. The app stores the text it displayed when the user accepted,
+    /// and clears it when they turn push off.
+    ///
+    /// Text rather than a flag, so that it is checked again on every open. If the
+    /// warning has been reworded since, this no longer matches and push comes up
+    /// [`PushState::Stale`] instead of on.
+    pub push_consent: String,
 }
 
 /// One message, as a reader sees it.
@@ -154,6 +201,10 @@ pub struct FileHandle {
 pub struct Session {
     client: Client<Remote>,
     rng: OsRandom,
+    /// The push setting, which can only be `On` through a [`Consent`].
+    push: Setting,
+    /// Whether the last consent offered was for a warning that has changed.
+    push_stale: bool,
 }
 
 fn room_id(b: &[u8]) -> Result<RoomId, SessionError> {
@@ -163,6 +214,68 @@ fn room_id(b: &[u8]) -> Result<RoomId, SessionError> {
 }
 
 impl Session {
+    /// Publish the 64-byte identity to approve this account in contacts.
+    pub fn public_identity(&self) -> Vec<u8> {
+        let p = self.client.public();
+        [p.sign.as_bytes().as_slice(), p.kem.as_bytes()].concat()
+    }
+    /// List approved contacts as (display name, public identity).
+    pub fn contacts(&self) -> Vec<(String, Vec<u8>)> {
+        self.client
+            .contacts()
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    [c.sign.as_slice(), c.kem.as_slice()].concat(),
+                )
+            })
+            .collect()
+    }
+    /// Approve a public identity or a confidential 96-byte contact card; return our reply card.
+    pub fn add_contact(&mut self, name: &str, card: &[u8]) -> Result<Vec<u8>, SessionError> {
+        if card.len() != 64 && card.len() != 96 {
+            return Err(SessionError::Malformed);
+        }
+        let identity = card[..64].try_into().map_err(|_| SessionError::Malformed)?;
+        let permit = if card.len() == 96 {
+            Some(card[64..].try_into().unwrap())
+        } else {
+            None
+        };
+        Ok(self
+            .client
+            .add_contact(&mut self.rng, name, &identity, permit)?)
+    }
+    /// Revoke a contact by its 32-byte signing key.
+    pub fn remove_contact(&mut self, key: &[u8]) -> Result<(), SessionError> {
+        Ok(self.client.remove_contact(
+            &mut self.rng,
+            &key.try_into().map_err(|_| SessionError::Malformed)?,
+        )?)
+    }
+    /// Send a contact note, only with an explicitly exchanged permit.
+    pub fn contact_note(&mut self, key: &[u8], note: &str) -> Result<(), SessionError> {
+        Ok(self.client.contact_note(
+            &mut self.rng,
+            &key.try_into().map_err(|_| SessionError::Malformed)?,
+            note,
+        )?)
+    }
+    /// Read authenticated notes from contacts; unknown senders are discarded.
+    pub fn contact_inbox(&self) -> Result<Vec<Note>, SessionError> {
+        Ok(self
+            .client
+            .contact_inbox()?
+            .into_iter()
+            .map(|n| Note {
+                from: n.from.sign.as_bytes().to_vec(),
+                body: n.note.into_bytes(),
+                generation: 0,
+            })
+            .collect())
+    }
+
     /// Open an account from its recovery phrase and connect.
     pub fn open(phrase: &str, cfg: &Config) -> Result<Self, SessionError> {
         let mode = match cfg.tor.as_str() {
@@ -194,10 +307,54 @@ impl Session {
         )
         .map_err(|_| SessionError::Unreachable)?;
 
+        // Through `Consent::acknowledge`, the same as a fresh opt-in, so a stored
+        // consent cannot outlive the wording it was given to.
+        let (push, push_stale) = match cfg.push_consent.as_str() {
+            "" => (Setting::Off, false),
+            shown => match Consent::acknowledge(shown) {
+                Ok(c) => (Setting::On(c), false),
+                Err(_) => (Setting::Off, true),
+            },
+        };
+
         Ok(Self {
             client: Client::open(phrase, remote)?,
             rng: OsRandom,
+            push,
+            push_stale,
         })
+    }
+
+    /// Whether this device may use push.
+    ///
+    /// Nothing registers yet, whatever this says: there is no delivery service, and
+    /// minting a token nothing will consume would be the leak with none of the
+    /// benefit. This is the setting a registration call will consult once there is
+    /// one.
+    pub fn push_state(&self) -> PushState {
+        match (self.push, self.push_stale) {
+            (Setting::On(_), _) => PushState::On,
+            (Setting::Off, true) => PushState::Stale,
+            (Setting::Off, false) => PushState::Off,
+        }
+    }
+
+    /// Turn push on, after the user accepted the warning.
+    ///
+    /// `shown` is the text the interface displayed, which must be exactly
+    /// [`push_warning`]. On success the app should store it as
+    /// [`Config::push_consent`].
+    pub fn enable_push(&mut self, shown: &str) -> Result<(), SessionError> {
+        let consent = Consent::acknowledge(shown).map_err(|_| SessionError::WarningNotShown)?;
+        self.push = Setting::On(consent);
+        self.push_stale = false;
+        Ok(())
+    }
+
+    /// Turn push off. The app should clear [`Config::push_consent`].
+    pub fn disable_push(&mut self) {
+        self.push = Setting::Off;
+        self.push_stale = false;
     }
 
     /// This account's address, as the text a person shares.
@@ -231,6 +388,11 @@ impl Session {
     /// This account's key package, which someone else needs in order to invite it.
     pub fn key_package(&self) -> Result<Vec<u8>, SessionError> {
         Ok(self.client.key_package()?)
+    }
+
+    /// Export a key package whose private state survives closing the session.
+    pub fn saved_key_package(&mut self) -> Result<Vec<u8>, SessionError> {
+        Ok(self.client.saved_key_package(&mut self.rng)?)
     }
 
     /// Invite the holder of `key_package` into `room`.
@@ -282,6 +444,12 @@ impl Session {
             name: name.as_bytes().to_vec(),
             key: key.expose().to_vec(),
         })
+    }
+
+    /// Retry the exact upload interrupted by a network or process failure.
+    pub fn retry_pending_upload(&mut self) -> Result<(), SessionError> {
+        self.client.retry_pending_upload(&mut self.rng)?;
+        Ok(())
     }
 
     /// Fetch a shared file by its capability.

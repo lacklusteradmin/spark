@@ -16,7 +16,9 @@ pub use spark_transport::Class;
 
 /// Proof that the caller holds the key behind an address.
 #[derive(Clone, Debug)]
-pub struct Auth {
+pub struct Auth<'a> {
+    /// In-process signer reference. Never serialized or sent to a service.
+    pub signer: Option<&'a spark_identity::Identity>,
     /// The keyring address.
     pub addr: [u8; 32],
     /// The public key it was derived from.
@@ -60,9 +62,15 @@ pub trait KeyringService {
     /// Append a delta.
     fn put_delta(&self, auth: &Auth, chunk: &[u8]) -> Result<(), ServiceError>;
     /// Replace the snapshot, dropping the deltas it subsumes.
-    fn put_snapshot(&self, auth: &Auth, chunk: &[u8]) -> Result<(), ServiceError>;
+    fn put_snapshot(
+        &self,
+        auth: &Auth,
+        chunk: &[u8],
+        expected: (Option<[u8; 32]>, u32),
+        permits: &[[u8; 32]],
+    ) -> Result<(), ServiceError>;
     /// The token issuer's public key, DER-encoded.
-    fn issuer_key(&self) -> Result<Vec<u8>, ServiceError>;
+    fn issuer_key(&self, size_class: u8) -> Result<Vec<u8>, ServiceError>;
     /// Exchange quota for blind signatures over already-blinded claims.
     fn withdraw(
         &self,
@@ -70,8 +78,17 @@ pub trait KeyringService {
         blinded: &[Vec<u8>],
         size_class: u8,
     ) -> Result<Vec<Vec<u8>>, ServiceError>;
+    /// Redeem an authenticated, denomination-bound refund.
+    fn credit_refund(
+        &self,
+        auth: &Auth,
+        claim: TokenClaim,
+        token: &Token,
+    ) -> Result<(), ServiceError>;
+    /// Authorize opaque contact permits; no public identities leave the client.
+    fn set_contacts(&self, auth: &Auth, permits: &[[u8; 32]]) -> Result<(), ServiceError>;
     /// Leave a contact request for an address. Unauthenticated by design.
-    fn put_request(&self, addr: &[u8; 32], blob: &[u8], token: &[u8]) -> Result<(), ServiceError>;
+    fn put_request(&self, addr: &[u8; 32], blob: &[u8], permit: &[u8]) -> Result<(), ServiceError>;
     /// Read this account's contact requests.
     fn requests(&self, auth: &Auth) -> Result<Vec<(u32, Vec<u8>)>, ServiceError>;
     /// Discard one, accepted or declined alike.
@@ -102,12 +119,16 @@ pub trait ContentService {
     ) -> Result<[u8; 32], ServiceError>;
     /// Fetch a chunk. Carries no identity.
     fn get(&self, class: Class, name: &[u8; 32]) -> Result<Option<Vec<u8>>, ServiceError>;
+    /// The content service's separate refund verification key.
+    fn refund_key(&self, class: Class, size_class: u8) -> Result<Vec<u8>, ServiceError>;
     /// Return a receipt, freeing the chunk at zero holders.
     fn release(
         &self,
         class: Class,
         name: &[u8; 32],
         receipt: &[u8; 32],
+        size_class: u8,
+        blinded: &[u8],
     ) -> Result<Vec<u8>, ServiceError>;
 }
 

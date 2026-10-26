@@ -12,10 +12,10 @@
 //!   function, and it is pure — which is only possible because payloads stay
 //!   opaque bytes at this layer. Interpreting an MLS message needs a provider,
 //!   and a provider is I/O.
-//! * **The outbox.** Sealing a room chunk under a derived nonce is safe only if
-//!   each slot is written once. [`Outbox::reserve`] makes the ordering a type
-//!   rule rather than a comment: sealing needs a [`Reservation`], and reserving
-//!   hands back the keyring delta that must be persisted first.
+//! * **The outbox.** [`Outbox::reserve`] advances the write cursor before
+//!   constructing a message and returns the delta the caller must persist.
+//!   Fresh random room nonces independently protect against stale or concurrent
+//!   clients encrypting different messages for the same slot.
 //!
 //! What is *not* here: fetching. Deciding what to request is trivial once the
 //! clock is known, and doing it is I/O.

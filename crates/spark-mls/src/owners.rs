@@ -88,6 +88,11 @@ impl OwnerSet {
             .chunks_exact(32)
             .map(|c| c.try_into().expect("chunk is 32 bytes"))
             .collect();
+        if v.iter().any(|b| VerifyingKey::from_bytes(b).is_err())
+            || v.windows(2).any(|w| w[0] >= w[1])
+        {
+            return Err(OwnerSetError::Malformed);
+        }
         let before = v.len();
         v.sort_unstable();
         v.dedup();

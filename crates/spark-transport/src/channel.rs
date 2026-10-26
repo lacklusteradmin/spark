@@ -31,13 +31,30 @@ impl<S: Read + Write> Channel<S> {
     /// there is nothing to put in it, and a path that varied per account would
     /// hand the server the correlation the rest of the design removes.
     pub fn connect(stream: S, url: &str) -> Result<Self, ChannelError> {
-        let (ws, _) = tungstenite::client(url, stream).map_err(|_| ChannelError::Handshake)?;
+        let (ws, _) = tungstenite::client::client_with_config(
+            url,
+            stream,
+            Some(
+                tungstenite::protocol::WebSocketConfig::default()
+                    .max_message_size(Some(spark_wire::MAX_FRAME))
+                    .max_frame_size(Some(spark_wire::MAX_FRAME)),
+            ),
+        )
+        .map_err(|_| ChannelError::Handshake)?;
         Ok(Self { ws, next_id: 1 })
     }
 
     /// Take the server side.
     pub fn accept(stream: S) -> Result<Self, ChannelError> {
-        let ws = tungstenite::accept(stream).map_err(|_| ChannelError::Handshake)?;
+        let ws = tungstenite::accept_with_config(
+            stream,
+            Some(
+                tungstenite::protocol::WebSocketConfig::default()
+                    .max_message_size(Some(spark_wire::MAX_FRAME))
+                    .max_frame_size(Some(spark_wire::MAX_FRAME)),
+            ),
+        )
+        .map_err(|_| ChannelError::Handshake)?;
         Ok(Self { ws, next_id: 1 })
     }
 

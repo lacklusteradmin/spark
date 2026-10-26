@@ -3,12 +3,13 @@
 //! layer 10, zone `io` — see `docs/layering.toml`.
 //!
 //! The only service that knows an account-shaped identifier exists. It sees
-//! `hash(pubkey)` and never a public key, never a room, never a peer.
+//! `hash(pubkey)`. Authentication carries the public key, but account records
+//! do not persist it or any room/peer identifier.
 //!
-//! **Authentication is stateless.** The challenge is an HMAC of the address under
-//! a server secret and the current minute, so the server verifies by recomputing
-//! rather than by remembering. Build-notes §3 asks for a stateless server, and a
-//! stored challenge table would be one more thing holding a per-account row.
+//! Wire authentication signs the complete canonical request, a minute challenge,
+//! and a one-use nonce. The challenge is stateless; replay consumption and its
+//! clock high-water mark are durable. `handle` is the trusted in-process fixture
+//! API; network listeners must use `handle_wire`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -17,9 +18,9 @@ pub mod wire;
 
 use spark_chunk::Chunk;
 use spark_crypto::{
-    Clock, IssuerKey, IssuerPublic, KeySet, Pacing, Secret, Signature, VerifyingKey,
-    hmac_sha256_parts,
+    Clock, IssuerKey, IssuerPublic, Pacing, Secret, Signature, VerifyingKey, hmac_sha256_parts,
 };
+use spark_store::mint::{Mint, PublicKeys};
 use spark_store::{Cell, Db};
 
 /// Table of keyring snapshots, keyed by address.
@@ -57,11 +58,11 @@ pub enum Request {
     /// Append a delta.
     PutDelta(Auth, Vec<u8>),
     /// Replace the snapshot and drop the deltas it subsumes.
-    PutSnapshot(Auth, Vec<u8>),
+    PutSnapshot(Auth, Vec<u8>, (Option<[u8; 32]>, u32), Vec<[u8; 32]>),
     /// Read quota.
     GetQuota(Auth),
     /// Fetch the token issuer's public key. Unauthenticated: it is public.
-    GetIssuerKey,
+    GetIssuerKey(u8),
     /// Exchange quota for blind tokens.
     ///
     /// The client sends *blinded* messages. This service debits quota for the
@@ -78,23 +79,20 @@ pub enum Request {
         size_class: u8,
     },
     /// Credit a refund voucher returned by the content service.
-    CreditRefund(Auth, Vec<u8>, u64),
+    CreditRefund(Auth, spark_crypto::TokenClaim, spark_crypto::Token),
 
-    /// Leave a contact request for an address.
-    ///
-    /// **Deliberately unauthenticated.** The sender is by definition not the
-    /// holder of the recipient's key, so there is nothing they could sign that
-    /// this service should accept. Spam is priced instead of identified: the
-    /// write costs a blind token, exactly as an upload does, which is the same
-    /// answer F7 gives to the same question.
+    /// Leave a signed, encrypted request using a recipient-issued contact permit.
+    /// The recipient's account authentication is never shared with the sender.
     PutRequest {
         /// Where to leave it.
         addr: [u8; 32],
         /// The sealed request. Opaque here.
         blob: Vec<u8>,
-        /// A blind token, spendable once.
-        token: Vec<u8>,
+        /// A recipient-issued 32-byte inbox permit.
+        permit: Vec<u8>,
     },
+    /// Replace the bounded list of opaque contact authorization hashes.
+    SetContacts(Auth, Vec<[u8; 32]>),
     /// Read the tray. Recipient only.
     GetRequests(Auth),
     /// Discard one request, accepted or declined alike.
@@ -177,10 +175,12 @@ pub enum Refusal {
 #[derive(Clone)]
 pub struct Keyring {
     db: Db,
-    issuer: std::sync::Arc<std::sync::Mutex<KeySet>>,
+    issuer: std::sync::Arc<std::sync::Mutex<Mint>>,
     pacing: Pacing,
     overruns: std::sync::Arc<std::sync::atomic::AtomicU64>,
     server_secret: Secret<32>,
+    refunds: std::sync::Arc<std::sync::Mutex<PublicKeys>>,
+    operation: std::sync::Arc<std::sync::Mutex<()>>,
     /// The current minute, supplied rather than read from a clock. A `now()` here
     /// would make every test time-dependent and the challenge unverifiable in a
     /// replay of a recorded session.
@@ -195,24 +195,48 @@ impl Keyring {
     /// A service over `db`, with a server secret used only for challenges and an
     /// issuer key for storage tokens.
     pub fn new(db: Db, server_secret: Secret<32>, issuer: IssuerKey) -> Self {
+        let issuer = Mint::persisted(&db, "storage", Some(issuer));
+        let server_secret = Secret::new(
+            db.secret("challenge", || server_secret.expose().to_vec())
+                .try_into()
+                .expect("challenge key"),
+        );
         Self {
             db,
-            issuer: std::sync::Arc::new(std::sync::Mutex::new(KeySet::new(issuer))),
+            issuer: std::sync::Arc::new(std::sync::Mutex::new(issuer)),
             pacing: Pacing::DEFAULT,
             overruns: Default::default(),
             server_secret,
-            minute: Default::default(),
+            refunds: Default::default(),
+            operation: Default::default(),
+            minute: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
         }
     }
 
     /// The token issuer's public key, which clients blind against.
     pub fn issuer_public(&self) -> IssuerPublic {
-        self.issuer.lock().expect("keyset lock").signing().public()
+        self.issuer_public_for(20).unwrap()
+    }
+
+    /// Public key bound to one requested storage denomination.
+    pub fn issuer_public_for(&self, class: u8) -> Option<IssuerPublic> {
+        let transaction = self
+            .db
+            .transaction()
+            .expect("mint provisioning transaction");
+        let public = self.issuer.lock().unwrap().key(class).map(|k| k.public());
+        transaction.commit().expect("mint provisioning commit");
+        public
     }
 
     /// Every key the content service should accept, newest first.
-    pub fn accepted_keys(&self) -> Vec<IssuerPublic> {
-        self.issuer.lock().expect("keyset lock").accepted()
+    pub fn accepted_keys(&self) -> PublicKeys {
+        self.issuer.lock().expect("keyset lock").public_keys()
+    }
+
+    /// Configure only the content service refund mint, never the storage mint.
+    pub fn set_refund_keys(&self, keys: PublicKeys) {
+        *self.refunds.lock().unwrap() = keys;
     }
 
     /// Retire the signing key in favour of `next`.
@@ -221,7 +245,9 @@ impl Keyring {
     /// until the next rotation. The retired key still verifies, so tokens a user
     /// already holds keep working for one more rotation period.
     pub fn rotate_issuer_key(&self, next: IssuerKey) {
-        self.issuer.lock().expect("keyset lock").rotate(next);
+        let transaction = self.db.transaction().expect("mint rotation transaction");
+        self.issuer.lock().expect("keyset lock").replace(20, next);
+        transaction.commit().expect("mint rotation commit");
     }
 
     /// How many requests took longer than one pacing tick.
@@ -258,14 +284,26 @@ impl Keyring {
         &self.db
     }
 
-    /// Advance the clock. Callers drive this; the service never reads one.
+    /// Override the server clock for deterministic tests. Defaults to system time.
     pub fn set_minute(&self, m: u64) {
         self.minute.store(m, std::sync::atomic::Ordering::SeqCst);
     }
 
+    fn now_minute(&self) -> u64 {
+        let fixed = self.minute.load(std::sync::atomic::Ordering::SeqCst);
+        if fixed != u64::MAX {
+            return fixed;
+        }
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_secs()
+            / 60
+    }
+
     /// The challenge an address must sign right now.
     pub fn challenge(&self, addr: &[u8; 32]) -> [u8; 32] {
-        let m = self.minute.load(std::sync::atomic::Ordering::SeqCst);
+        let m = self.now_minute();
         hmac_sha256_parts(
             &self.server_secret,
             &[b"spark/v1/challenge", addr, &m.to_be_bytes()],
@@ -287,13 +325,28 @@ impl Keyring {
 
     /// Handle one request.
     pub fn handle(&self, req: Request) -> Response {
+        let transaction = self
+            .db
+            .transaction()
+            .expect("service transaction unavailable");
+        let response = self.handle_inner(req, false);
+        transaction.commit().expect("service commit failed");
+        response
+    }
+
+    fn handle_inner(&self, req: Request, request_verified: bool) -> Response {
+        let _operation = self.operation.lock().unwrap();
         let auth = match &req {
             Request::Challenge { addr } => return Response::Challenge(self.challenge(addr)),
-            Request::PutRequest { addr, blob, token } => {
-                return self.put_request(*addr, blob.clone(), token.clone());
+            Request::PutRequest { addr, blob, permit } => {
+                return self.put_request(*addr, blob.clone(), permit.clone());
             }
-            Request::GetIssuerKey => {
-                return match self.issuer_public().to_der() {
+            Request::GetIssuerKey(class) => {
+                let mut mint = self.issuer.lock().unwrap();
+                let Some(key) = mint.key(*class) else {
+                    return Response::Refused(Refusal::Malformed);
+                };
+                return match key.public().to_der() {
                     Ok(d) => Response::IssuerKey(d),
                     Err(_) => Response::Refused(Refusal::Malformed),
                 };
@@ -301,21 +354,26 @@ impl Keyring {
             Request::GetSnapshot(a)
             | Request::GetDeltas(a)
             | Request::PutDelta(a, _)
-            | Request::PutSnapshot(a, _)
+            | Request::PutSnapshot(a, _, _, _)
             | Request::GetQuota(a)
             | Request::WithdrawTokens { auth: a, .. }
             | Request::CreditRefund(a, _, _)
             | Request::GetRequests(a)
-            | Request::DropRequest(a, _) => a,
+            | Request::DropRequest(a, _)
+            | Request::SetContacts(a, _) => a,
         };
-        let addr = match self.verify(auth) {
+        let addr = match if request_verified {
+            Ok(hex(&auth.addr))
+        } else {
+            self.verify(auth)
+        } {
             Ok(a) => a,
             Err(r) => return Response::Refused(r),
         };
         self.count_request(&addr);
 
         match req {
-            Request::Challenge { .. } | Request::GetIssuerKey => unreachable!("handled above"),
+            Request::Challenge { .. } | Request::GetIssuerKey(_) => unreachable!("handled above"),
             Request::GetSnapshot(_) => Response::Snapshot(
                 self.db
                     .field(T_KEYRING, &addr, "snapshot_bytes")
@@ -329,7 +387,9 @@ impl Keyring {
                     .collect(),
             ),
             Request::PutDelta(_, bytes) => self.put_delta(&addr, bytes),
-            Request::PutSnapshot(_, bytes) => self.put_snapshot(&addr, bytes),
+            Request::PutSnapshot(_, bytes, expected, permits) => {
+                self.put_snapshot(&addr, bytes, expected, permits)
+            }
             Request::GetQuota(_) => Response::Quota {
                 used: self.used(&addr),
                 limit: self.limit(&addr),
@@ -341,6 +401,20 @@ impl Keyring {
             } => self.withdraw(&addr, &blinded, size_class),
             Request::CreditRefund(_, v, amount) => self.credit(&addr, v, amount),
             Request::PutRequest { .. } => unreachable!("handled above"),
+            Request::SetContacts(_, permits) => {
+                if permits.len() > MAX_PENDING {
+                    return Response::Refused(Refusal::Malformed);
+                }
+                self.db.put(
+                    "inbox_gate",
+                    &addr,
+                    vec![("inbox_permits", Cell::Bytes(permits.concat()))],
+                );
+                for k in self.request_keys(&addr) {
+                    self.db.delete(T_REQUEST, &k);
+                }
+                Response::RequestDropped
+            }
             Request::GetRequests(_) => Response::Requests(
                 self.request_keys(&addr)
                     .into_iter()
@@ -362,12 +436,9 @@ impl Keyring {
     }
 
     fn request_keys(&self, addr: &str) -> Vec<String> {
-        let mut ks: Vec<String> = self
-            .db
-            .keys(T_REQUEST)
-            .into_iter()
-            .filter(|k| k.starts_with(&format!("{addr}:")))
-            .collect();
+        let mut ks: Vec<String> =
+            self.db
+                .keys_between(T_REQUEST, &format!("{addr}:"), &format!("{addr};"));
         ks.sort_by_key(|k| {
             k.rsplit(':')
                 .next()
@@ -377,51 +448,37 @@ impl Keyring {
         ks
     }
 
-    fn put_request(&self, addr: [u8; 32], blob: Vec<u8>, token: Vec<u8>) -> Response {
-        let serial = hex(&token);
-        if !self.db.put_if_absent(
-            T_REQUEST,
-            &format!("token:{serial}"),
-            vec![("request_bytes", Cell::Bytes(token))],
-        ) {
-            // Even this is not distinguishable to a sender who reuses a token by
-            // accident versus one probing: both get the same answer below.
+    fn put_request(&self, addr: [u8; 32], blob: Vec<u8>, permit: Vec<u8>) -> Response {
+        // A contacts-only inbox: invalid requests allocate nothing. One outstanding
+        // request per contact, so one authorized contact cannot fill everyone else's slots.
+        if permit.len() != 32 || blob.len() > 16 * 1024 {
             return Response::RequestTaken;
         }
         let a = hex(&addr);
-        let existing = self.request_keys(&a);
-        if existing.len() < MAX_PENDING {
-            let index = existing
-                .last()
-                .and_then(|k| k.rsplit(':').next())
-                .and_then(|n| n.parse::<u32>().ok())
-                .map_or(0, |n| n + 1);
-            self.db.put(
-                T_REQUEST,
-                &format!("{a}:{index}"),
-                vec![
-                    ("addr", Cell::Text(a)),
-                    ("request_index", Cell::Num(index as u64)),
-                    ("request_bytes", Cell::Bytes(blob)),
-                    (
-                        "mtime",
-                        Cell::Num(self.minute.load(std::sync::atomic::Ordering::SeqCst)),
-                    ),
-                ],
-            );
-        }
-        // Same answer whether it was stored, dropped for a full tray, or sent to
-        // an address that does not exist.
+        let Some(Cell::Bytes(permits)) = self.db.field("inbox_gate", &a, "inbox_permits") else {
+            return Response::RequestTaken;
+        };
+        let hash = spark_crypto::sha256(&permit);
+        let Some(index) = permits.chunks_exact(32).position(|p| p == hash) else {
+            return Response::RequestTaken;
+        };
+        self.db.put_if_absent(
+            T_REQUEST,
+            &format!("{a}:{index}"),
+            vec![
+                ("addr", Cell::Text(a)),
+                ("request_index", Cell::Num(index as u64)),
+                ("request_bytes", Cell::Bytes(blob)),
+                ("mtime", Cell::Num(self.now_minute())),
+            ],
+        );
         Response::RequestTaken
     }
 
     fn delta_keys(&self, addr: &str) -> Vec<String> {
-        let mut ks: Vec<String> = self
-            .db
-            .keys(T_DELTA)
-            .into_iter()
-            .filter(|k| k.starts_with(&format!("{addr}:")))
-            .collect();
+        let mut ks: Vec<String> =
+            self.db
+                .keys_between(T_DELTA, &format!("{addr}:"), &format!("{addr};"));
         ks.sort_by_key(|k| {
             k.rsplit(':')
                 .next()
@@ -443,10 +500,7 @@ impl Keyring {
                 ("addr", Cell::Text(addr.to_string())),
                 ("delta_index", Cell::Num(index as u64)),
                 ("delta_bytes", Cell::Bytes(bytes)),
-                (
-                    "mtime",
-                    Cell::Num(self.minute.load(std::sync::atomic::Ordering::SeqCst)),
-                ),
+                ("mtime", Cell::Num(self.now_minute())),
             ],
         );
         Response::Appended {
@@ -455,7 +509,28 @@ impl Keyring {
         }
     }
 
-    fn put_snapshot(&self, addr: &str, bytes: Vec<u8>) -> Response {
+    fn put_snapshot(
+        &self,
+        addr: &str,
+        bytes: Vec<u8>,
+        expected: (Option<[u8; 32]>, u32),
+        permits: Vec<[u8; 32]>,
+    ) -> Response {
+        if permits.len() > MAX_PENDING {
+            return Response::Refused(Refusal::Malformed);
+        }
+        let current = self
+            .db
+            .field(T_KEYRING, addr, "snapshot_bytes")
+            .and_then(|c| c.bytes().map(spark_crypto::sha256));
+        let deltas = self.delta_keys(addr);
+        if (current, deltas.len() as u32) != expected {
+            // Exact duplicate after a lost response is safe to acknowledge.
+            if current == Some(spark_crypto::sha256(&bytes)) && deltas.is_empty() {
+                return Response::SnapshotWritten;
+            }
+            return Response::Refused(Refusal::Malformed);
+        }
         if Chunk::from_bytes(bytes.clone()).is_err() {
             return Response::Refused(Refusal::Malformed);
         }
@@ -466,14 +541,22 @@ impl Keyring {
                 ("addr", Cell::Text(addr.to_string())),
                 ("snapshot_len", Cell::Num(bytes.len() as u64)),
                 ("snapshot_bytes", Cell::Bytes(bytes)),
-                (
-                    "mtime",
-                    Cell::Num(self.minute.load(std::sync::atomic::Ordering::SeqCst)),
-                ),
+                ("mtime", Cell::Num(self.now_minute())),
             ],
         );
         for k in self.delta_keys(addr) {
             self.db.delete(T_DELTA, &k);
+        }
+        let gate = permits.concat();
+        if self.db.field("inbox_gate", addr, "inbox_permits") != Some(Cell::Bytes(gate.clone())) {
+            self.db.put(
+                "inbox_gate",
+                addr,
+                vec![("inbox_permits", Cell::Bytes(gate))],
+            );
+            for key in self.request_keys(addr) {
+                self.db.delete(T_REQUEST, &key);
+            }
         }
         Response::SnapshotWritten
     }
@@ -504,17 +587,37 @@ impl Keyring {
         if !(10..=40).contains(&size_class) {
             return Response::Refused(Refusal::Malformed);
         }
+        if blinded.is_empty() || blinded.len() > 64 {
+            return Response::Refused(Refusal::Malformed);
+        }
+        if blinded.iter().any(|b| b.len() != 256) {
+            return Response::Refused(Refusal::Malformed);
+        }
+        let mut operation = vec![size_class];
+        for b in blinded {
+            operation.extend_from_slice(b);
+        }
+        let retry_key = format!("{addr}:{}", hex(&spark_crypto::sha256(&operation)));
+        if let Some(c) = self
+            .db
+            .field("withdrawal", &retry_key, "withdrawal_response")
+        {
+            return Response::Tokens(
+                c.bytes()
+                    .unwrap()
+                    .chunks_exact(256)
+                    .map(|b| b.to_vec())
+                    .collect(),
+            );
+        }
         let cost = (1u64 << size_class) * blinded.len() as u64;
-        if self.used(addr) + cost > self.limit(addr) {
+        if self
+            .used(addr)
+            .checked_add(cost)
+            .is_none_or(|used| used > self.limit(addr))
+        {
             return Response::Refused(Refusal::OverQuota);
         }
-        self.db.bump(
-            T_QUOTA,
-            addr,
-            "quota_media_used",
-            cost as i64,
-            self.quota_row(addr),
-        );
 
         // Signing blinded bytes. Nothing about `addr` reaches the signature, and
         // nothing about the signature is recorded here.
@@ -524,37 +627,76 @@ impl Keyring {
                 .issuer
                 .lock()
                 .expect("keyset lock")
-                .signing()
+                .key(size_class)
+                .expect("validated denomination")
                 .blind_sign(b)
             {
                 Ok(sig) => out.push(sig),
                 Err(_) => return Response::Refused(Refusal::Malformed),
             }
         }
+        self.db.bump(
+            T_QUOTA,
+            addr,
+            "quota_media_used",
+            cost as i64,
+            self.quota_row(addr),
+        );
+        self.db.put(
+            "withdrawal",
+            &retry_key,
+            vec![("withdrawal_response", Cell::Bytes(out.concat()))],
+        );
         Response::Tokens(out)
     }
 
-    fn credit(&self, addr: &str, voucher: Vec<u8>, amount: u64) -> Response {
-        let key = hex(&voucher);
+    fn credit(
+        &self,
+        addr: &str,
+        claim: spark_crypto::TokenClaim,
+        token: spark_crypto::Token,
+    ) -> Response {
+        if !self
+            .refunds
+            .lock()
+            .unwrap()
+            .verify(claim.size_class, &token, &claim.refund_message())
+        {
+            return Response::Refused(Refusal::Malformed);
+        }
+        let key = hex(&claim.serial);
         if !self.db.put_if_absent(
             T_REFUND,
             &key,
-            vec![("spent_refund_voucher", Cell::Bytes(voucher))],
+            vec![
+                ("spent_refund_voucher", Cell::Bytes(claim.serial.to_vec())),
+                ("refund_account", Cell::Text(addr.to_string())),
+            ],
         ) {
-            return Response::Refused(Refusal::VoucherSpent);
+            return if self
+                .db
+                .field(T_REFUND, &key, "refund_account")
+                .and_then(|c| c.text().map(str::to_owned))
+                .as_deref()
+                == Some(addr)
+            {
+                Response::Credited
+            } else {
+                Response::Refused(Refusal::VoucherSpent)
+            };
         }
         self.db.bump(
             T_QUOTA,
             addr,
             "quota_media_used",
-            -(amount as i64),
+            -(claim.max_bytes() as i64),
             self.quota_row(addr),
         );
         Response::Credited
     }
 
     fn count_request(&self, addr: &str) {
-        let m = self.minute.load(std::sync::atomic::Ordering::SeqCst);
+        let m = self.now_minute();
         let start = self
             .db
             .field(T_RATE, addr, "rate_window_start")

@@ -27,6 +27,21 @@ use spark_crypto::{
     VoucherClaim, verify_any,
 };
 use spark_store::{Cell, Db};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+/// Trusted payment adapter. Verify settlement, recipient, value, and a payment
+/// commitment to this exact blinded request. Never trust a request-supplied amount.
+pub trait PaymentVerifier: Send + Sync {
+    /// True only for an irrevocably settled payment bound to these bytes.
+    fn verify(&self, payment: &[u8], amount: u64, blinded: &[u8]) -> bool;
+}
+struct DenyPayments;
+impl PaymentVerifier for DenyPayments {
+    fn verify(&self, _: &[u8], _: u64, _: &[u8]) -> bool {
+        false
+    }
+}
 
 /// Table of name to key mappings, keyed by name.
 pub const T_NAME: &str = "name_mapping";
@@ -49,7 +64,7 @@ pub enum Request {
     /// Resolve one exact name.
     ///
     /// `today` because a lapsed name must stop resolving, and this service holds
-    /// no clock — the same discipline as everywhere else.
+    /// a trusted server clock; the hint is ignored.
     Resolve(String, u32),
     /// Register a name against a key, paying with a voucher.
     Register {
@@ -65,7 +80,7 @@ pub enum Request {
         claim: VoucherClaim,
         /// The issuer's signature over that claim.
         voucher: Token,
-        /// Today, so expiry is the caller's clock rather than the server's.
+        /// Untrusted client date hint; ignored for authorization and expiry.
         today: u32,
     },
     /// Move a name to a key the current holder signs for.
@@ -77,6 +92,8 @@ pub enum Request {
         /// The current holder's signature over the transfer.
         sig: [u8; 64],
     },
+    /// Read the current transfer challenge.
+    TransferChallenge(String),
     /// Buy a voucher.
     ///
     /// The buyer sends a *blinded* claim. The issuer confirms the payment, marks
@@ -104,11 +121,11 @@ pub enum Request {
         claim: VoucherClaim,
         /// Its signature.
         voucher: Token,
-        /// Today, so expiry is the caller's clock rather than the server's.
+        /// Untrusted client date hint; ignored for authorization and expiry.
         today: u32,
     },
     /// The issuer's voucher-signing public key.
-    IssuerKey,
+    IssuerKey(u64),
 }
 
 /// A response from the issuer.
@@ -119,6 +136,8 @@ pub enum Response {
     /// A miss and a hit are the same shape and the same cost: anything that made
     /// them distinguishable in timing would be a probe oracle.
     Resolved(Option<[u8; 64]>),
+    /// Current transfer challenge, if the name exists.
+    TransferChallenge(Option<[u8; 32]>),
     /// Registered.
     Registered,
     /// Transferred. The old key appears nowhere afterwards.
@@ -178,7 +197,10 @@ pub fn is_premium(name: &str) -> bool {
 #[derive(Clone)]
 pub struct Issuer {
     db: Db,
-    signing: std::sync::Arc<std::sync::Mutex<KeySet>>,
+    signing: Arc<Mutex<BTreeMap<u64, KeySet>>>,
+    payment_verifier: Arc<dyn PaymentVerifier>,
+    operation: Arc<Mutex<()>>,
+    day_clock: Arc<dyn Fn() -> u32 + Send + Sync>,
     pacing: Pacing,
     overruns: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
@@ -192,30 +214,107 @@ impl Issuer {
     /// sees `hash(pubkey)` would let whoever holds it mint both, and would make
     /// the two domains one in every way that matters.
     pub fn new(db: Db, signing: IssuerKey) -> Self {
+        let key = KeySet::from_secret_bytes(
+            &db.secret("price/1", || KeySet::new(signing).secret_bytes().unwrap()),
+        )
+        .expect("issuer key vault");
+        let mut signing = BTreeMap::from([(1, key)]);
+        for name in db.secret_names("price/") {
+            let price = name[6..].parse().expect("vault price");
+            signing.insert(
+                price,
+                KeySet::from_secret_bytes(&db.secret(&name, || unreachable!()))
+                    .expect("issuer vault"),
+            );
+        }
         Self {
             db,
-            signing: std::sync::Arc::new(std::sync::Mutex::new(KeySet::new(signing))),
+            signing: Arc::new(Mutex::new(signing)),
+            payment_verifier: Arc::new(DenyPayments),
+            operation: Default::default(),
+            day_clock: Arc::new(|| {
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock before epoch")
+                    .as_secs()
+                    / 86400)
+                    .try_into()
+                    .expect("day overflow")
+            }),
             pacing: Pacing::DEFAULT,
             overruns: Default::default(),
         }
     }
 
-    /// The voucher-signing public key.
+    /// Configure a trusted payment adapter. The default rejects all payments.
+    pub fn with_payment_verifier(mut self, verifier: Arc<dyn PaymentVerifier>) -> Self {
+        self.payment_verifier = verifier;
+        self
+    }
+
+    /// Inject a server-owned clock, for deterministic tests or deployment time.
+    pub fn with_day_clock(mut self, clock: Arc<dyn Fn() -> u32 + Send + Sync>) -> Self {
+        self.day_clock = clock;
+        self
+    }
+
+    /// Provision a separate key for a price, outside the network request path.
+    pub fn provision_price(&self, price: u64, key: IssuerKey) {
+        assert!(price > 0);
+        let transaction = self
+            .db
+            .transaction()
+            .expect("price provisioning transaction");
+        let key = KeySet::from_secret_bytes(&self.db.secret(&format!("price/{price}"), || {
+            KeySet::new(key).secret_bytes().unwrap()
+        }))
+        .expect("issuer vault");
+        self.signing.lock().unwrap().entry(price).or_insert(key);
+        transaction.commit().expect("price provisioning commit");
+    }
+
+    /// The verification key for one price. Unknown prices fail closed.
+    pub fn signing_public_for(&self, price: u64) -> Option<IssuerPublic> {
+        self.signing
+            .lock()
+            .unwrap()
+            .get(&price)
+            .map(|k| k.signing().public())
+    }
+
+    /// The default one-unit voucher verification key.
     pub fn signing_public(&self) -> IssuerPublic {
-        self.signing.lock().expect("keyset lock").signing().public()
+        self.signing_public_for(1).unwrap()
     }
 
-    /// Every key a voucher may have been signed with, newest first.
+    /// Rotate one provisioned price key.
+    pub fn rotate_price_key(&self, price: u64, key: IssuerKey) {
+        let transaction = self.db.transaction().expect("rotation transaction");
+        let mut keys = self.signing.lock().unwrap();
+        let set = keys.get_mut(&price).expect("provisioned price");
+        set.rotate(key);
+        self.db
+            .replace_secret(&format!("price/{price}"), &set.secret_bytes().unwrap());
+        transaction.commit().expect("rotation commit");
+    }
+
+    /// Accepted verification keys for the default price only.
     pub fn accepted_keys(&self) -> Vec<IssuerPublic> {
-        self.signing.lock().expect("keyset lock").accepted()
+        self.signing.lock().unwrap().get(&1).unwrap().accepted()
     }
 
-    /// Retire the voucher-signing key in favour of `next`.
-    ///
-    /// Bounds the blast radius of RUSTSEC-2023-0071. The retired key still
-    /// verifies, so a voucher someone bought before the rotation is still good.
+    /// Rotate the default price key, retaining accepted verification keys.
     pub fn rotate_signing_key(&self, next: IssuerKey) {
-        self.signing.lock().expect("keyset lock").rotate(next);
+        self.rotate_price_key(1, next);
+    }
+
+    /// Current transfer challenge; replaced on registration and every transfer.
+    pub fn transfer_challenge(&self, name: &str) -> Option<[u8; 32]> {
+        self.db
+            .field(T_NAME, name, "transfer_nonce")?
+            .bytes()?
+            .try_into()
+            .ok()
     }
 
     /// How many requests took longer than one pacing tick. Non-zero means the
@@ -251,7 +350,7 @@ impl Issuer {
         self.db
             .field(T_NAME, name, "paid_until_day")
             .and_then(|c| c.num())
-            .is_some_and(|p| today <= p as u32 + GRACE_DAYS)
+            .is_some_and(|p| u64::from(today) <= p.saturating_add(u64::from(GRACE_DAYS)))
     }
 
     /// The store, for the permitted-knowledge audit.
@@ -266,16 +365,33 @@ impl Issuer {
 
     /// Handle one request.
     pub fn handle(&self, req: Request) -> Response {
+        let transaction = self
+            .db
+            .transaction()
+            .expect("service transaction unavailable");
+        let response = self.handle_inner(req);
+        transaction.commit().expect("service commit failed");
+        response
+    }
+
+    fn handle_inner(&self, req: Request) -> Response {
+        let _operation = self.operation.lock().unwrap();
+        let server_today = (self.day_clock)();
         match req {
-            Request::IssuerKey => match self.signing_public().to_der() {
-                Ok(d) => Response::IssuerKey(d),
-                Err(_) => Response::Refused(Refusal::BadVoucher),
-            },
+            Request::TransferChallenge(name) => {
+                Response::TransferChallenge(self.transfer_challenge(&name))
+            }
+            Request::IssuerKey(price) => {
+                match self.signing_public_for(price).and_then(|k| k.to_der().ok()) {
+                    Some(d) => Response::IssuerKey(d),
+                    None => Response::Refused(Refusal::BadVoucher),
+                }
+            }
 
             // Exact match only, and only while the name is live. No prefix, no
             // listing, no autocomplete: the namespace must not be enumerable (F5).
-            Request::Resolve(name, today) => Response::Resolved(
-                self.live(&name, today)
+            Request::Resolve(name, _today) => Response::Resolved(
+                self.live(&name, server_today)
                     .then(|| self.key_of(&name))
                     .flatten(),
             ),
@@ -285,26 +401,50 @@ impl Issuer {
                 payment,
                 amount,
             } => {
-                // Spend the payment before signing. A payment that could be
-                // replayed would mint unlimited vouchers, which is the same hole
-                // as a reusable token one service down.
-                let key = hex(&payment);
-                if !self.db.put_if_absent(
-                    T_PAYMENT,
-                    &key,
-                    vec![("spent_payment_ref", Cell::Bytes(payment))],
-                ) {
-                    return Response::Refused(Refusal::PaymentSpent);
-                }
-                // The amount is checked against the price table, but the *claim*
-                // is blinded — so this cannot verify that the buyer paid for what
-                // they are about to receive. That is unavoidable and is why the
-                // caller declares the amount: a buyer who underpays for a premium
-                // name gets a signature over a claim the price did not cover, and
-                // redemption is where that is caught, below.
-                if amount == 0 {
+                if payment.is_empty()
+                    || payment.len() > 256
+                    || blinded.len() != 256
+                    || amount == 0
+                    || !self.payment_verifier.verify(&payment, amount, &blinded)
+                {
                     return Response::Refused(Refusal::Underpaid);
                 }
+                let signing = self.signing.lock().unwrap();
+                let Some(keyset) = signing.get(&amount) else {
+                    return Response::Refused(Refusal::Underpaid);
+                };
+                let key = hex(&payment);
+                let request_hash = spark_crypto::sha256_parts(&[&amount.to_be_bytes(), &blinded]);
+                if self.db.has(T_PAYMENT, &key) {
+                    if self
+                        .db
+                        .field(T_PAYMENT, &key, "payment_request_hash")
+                        .and_then(|c| c.bytes().map(|b| b == request_hash))
+                        .unwrap_or(false)
+                    {
+                        return Response::Signed(
+                            self.db
+                                .field(T_PAYMENT, &key, "payment_response")
+                                .unwrap()
+                                .bytes()
+                                .unwrap()
+                                .to_vec(),
+                        );
+                    }
+                    return Response::Refused(Refusal::PaymentSpent);
+                }
+                let Ok(sig) = keyset.signing().blind_sign(&blinded) else {
+                    return Response::Refused(Refusal::BadVoucher);
+                };
+                self.db.put(
+                    T_PAYMENT,
+                    &key,
+                    vec![
+                        ("spent_payment_ref", Cell::Bytes(payment)),
+                        ("payment_request_hash", Cell::Bytes(request_hash.to_vec())),
+                        ("payment_response", Cell::Bytes(sig.clone())),
+                    ],
+                );
                 self.db.bump(
                     T_ISSUANCE,
                     "total",
@@ -312,16 +452,7 @@ impl Issuer {
                     1,
                     vec![("blind_sig_count", Cell::Num(0))],
                 );
-                match self
-                    .signing
-                    .lock()
-                    .expect("keyset lock")
-                    .signing()
-                    .blind_sign(&blinded)
-                {
-                    Ok(sig) => Response::Signed(sig),
-                    Err(_) => Response::Refused(Refusal::BadVoucher),
-                }
+                Response::Signed(sig)
             }
 
             Request::Register {
@@ -329,8 +460,9 @@ impl Issuer {
                 key,
                 claim,
                 voucher,
-                today,
+                today: _,
             } => {
+                let today = server_today;
                 if !is_sellable(&name) {
                     return Response::Refused(Refusal::BadName);
                 }
@@ -342,13 +474,16 @@ impl Issuer {
                     return Response::Refused(Refusal::WrongGrant);
                 };
                 // The tier the voucher paid for must match the tier the name is.
-                if premium != is_premium(&name) {
+                if months == 0 || premium != is_premium(&name) {
                     return Response::Refused(Refusal::WrongGrant);
                 }
+                let Some(until) = today.checked_add(u32::from(months) * 30) else {
+                    return Response::Refused(Refusal::WrongGrant);
+                };
                 if let Err(r) = self.spend_voucher(&claim, &voucher) {
                     return Response::Refused(r);
                 }
-                self.write(&name, key, today + months as u32 * 30, premium);
+                self.write(&name, key, until, premium);
                 Response::Registered
             }
 
@@ -356,8 +491,9 @@ impl Issuer {
                 name,
                 claim,
                 voucher,
-                today,
+                today: _,
             } => {
+                let today = server_today;
                 let Some(paid) = self
                     .db
                     .field(T_NAME, &name, "paid_until_day")
@@ -373,16 +509,18 @@ impl Issuer {
                 let Grant::NameMonths { months, premium } = claim.grant else {
                     return Response::Refused(Refusal::WrongGrant);
                 };
-                if premium != is_premium(&name) {
+                if months == 0 || premium != is_premium(&name) {
                     return Response::Refused(Refusal::WrongGrant);
-                }
-                if let Err(r) = self.spend_voucher(&claim, &voucher) {
-                    return Response::Refused(r);
                 }
                 // Extend from whichever is later: renewing early must not shorten
                 // the term, and renewing during grace must not credit the lapse.
                 let base = (paid as u32).max(today);
-                let until = base + months as u32 * 30;
+                let Some(until) = base.checked_add(u32::from(months) * 30) else {
+                    return Response::Refused(Refusal::WrongGrant);
+                };
+                if let Err(r) = self.spend_voucher(&claim, &voucher) {
+                    return Response::Refused(r);
+                }
                 let key = self.key_of(&name).expect("a live name has a holder");
                 self.write(&name, key, until, premium);
                 Response::Renewed(until)
@@ -398,7 +536,11 @@ impl Issuer {
                 let Ok(vk) = VerifyingKey::from_bytes(&sign) else {
                     return Response::Refused(Refusal::BadSignature);
                 };
+                if !self.live(&name, server_today) {
+                    return Response::Refused(Refusal::Unknown);
+                }
                 let mut msg = TRANSFER_CONTEXT.to_vec();
+                msg.extend_from_slice(&self.transfer_challenge(&name).expect("registered nonce"));
                 msg.extend_from_slice(name.as_bytes());
                 msg.extend_from_slice(&new_key);
                 if vk.verify(&msg, &Signature::from_bytes(sig)).is_err() {
@@ -428,7 +570,14 @@ impl Issuer {
     /// Verify a voucher and mark its serial spent.
     fn spend_voucher(&self, claim: &VoucherClaim, voucher: &Token) -> Result<(), Refusal> {
         // Every accepted key, so a voucher bought before a rotation still works.
-        if verify_any(&self.accepted_keys(), voucher, &claim.encode()).is_err() {
+        let keys = self
+            .signing
+            .lock()
+            .unwrap()
+            .get(&claim.price())
+            .map(KeySet::accepted)
+            .unwrap_or_default();
+        if verify_any(&keys, voucher, &claim.encode()).is_err() {
             return Err(Refusal::BadVoucher);
         }
         // Verify before spending: an unsigned serial must not be able to burn a
@@ -445,6 +594,11 @@ impl Issuer {
     }
 
     fn write(&self, name: &str, key: [u8; 64], paid_until_day: u32, premium: bool) {
+        use spark_crypto::blind::TryRng;
+        let mut nonce = [0; 32];
+        spark_store::mint::OsRandom
+            .try_fill_bytes(&mut nonce)
+            .unwrap();
         self.db.put(
             T_NAME,
             name,
@@ -453,6 +607,7 @@ impl Issuer {
                 ("name_pubkey", Cell::Bytes(key.to_vec())),
                 ("paid_until_day", Cell::Num(paid_until_day as u64)),
                 ("name_tier", Cell::Num(premium as u64)),
+                ("transfer_nonce", Cell::Bytes(nonce.to_vec())),
             ],
         );
     }

@@ -35,7 +35,9 @@
 //! `Spark-build-notes.md` §1 names outright.
 
 pub mod session;
-pub use session::{Config, FileHandle, Note, Room, Session, SessionError};
+pub use session::{
+    Config, FileHandle, Note, PushState, Room, Session, SessionError, push_off_cost, push_warning,
+};
 
 use spark_client::{Auth, ContentService, IssuerService, KeyringService, ServiceError, Services};
 use spark_crypto::{Token, TokenClaim};
@@ -274,9 +276,31 @@ impl Remote {
 
 fn wire_auth(a: &Auth) -> spark_wire::Auth {
     spark_wire::Auth {
+        challenge: [0; 32],
+        nonce: [0; 32],
         addr: a.addr,
         key: a.key,
         sig: a.sig.to_vec(),
+    }
+}
+
+impl Remote {
+    fn authorized(
+        &self,
+        auth: &Auth,
+        mut req: keyring::Req,
+    ) -> Result<keyring::Resp, ServiceError> {
+        let signer = auth.signer.ok_or(ServiceError::Refused)?;
+        let challenge = self.challenge(&auth.addr);
+        let mut nonce = [0; 32];
+        getrandom::fill(&mut nonce).map_err(|_| ServiceError::Unreachable)?;
+        let proof = req.auth_mut().ok_or(ServiceError::Refused)?;
+        proof.challenge = challenge;
+        proof.nonce = nonce;
+        proof.sig.clear();
+        let sig = signer.sign(&req.signing_bytes());
+        req.auth_mut().unwrap().sig = sig.as_bytes().to_vec();
+        self.keyring.call(&req)
     }
 }
 
@@ -290,43 +314,43 @@ impl KeyringService for Remote {
         }
     }
     fn snapshot(&self, auth: &Auth) -> Result<Option<Vec<u8>>, ServiceError> {
-        match self
-            .keyring
-            .call(&keyring::Req::GetSnapshot(wire_auth(auth)))?
-        {
+        match self.authorized(auth, keyring::Req::GetSnapshot(wire_auth(auth)))? {
             keyring::Resp::Snapshot(s) => Ok(s),
             _ => Err(ServiceError::Refused),
         }
     }
     fn deltas(&self, auth: &Auth) -> Result<Vec<Vec<u8>>, ServiceError> {
-        match self
-            .keyring
-            .call(&keyring::Req::GetDeltas(wire_auth(auth)))?
-        {
+        match self.authorized(auth, keyring::Req::GetDeltas(wire_auth(auth)))? {
             keyring::Resp::Deltas(d) => Ok(d),
             _ => Err(ServiceError::Refused),
         }
     }
     fn put_delta(&self, auth: &Auth, chunk: &[u8]) -> Result<(), ServiceError> {
-        match self
-            .keyring
-            .call(&keyring::Req::PutDelta(wire_auth(auth), chunk.to_vec()))?
-        {
+        match self.authorized(
+            auth,
+            keyring::Req::PutDelta(wire_auth(auth), chunk.to_vec()),
+        )? {
             keyring::Resp::Appended { .. } => Ok(()),
             _ => Err(ServiceError::Refused),
         }
     }
-    fn put_snapshot(&self, auth: &Auth, chunk: &[u8]) -> Result<(), ServiceError> {
-        match self
-            .keyring
-            .call(&keyring::Req::PutSnapshot(wire_auth(auth), chunk.to_vec()))?
-        {
+    fn put_snapshot(
+        &self,
+        auth: &Auth,
+        chunk: &[u8],
+        expected: (Option<[u8; 32]>, u32),
+        permits: &[[u8; 32]],
+    ) -> Result<(), ServiceError> {
+        match self.authorized(
+            auth,
+            keyring::Req::PutSnapshot(wire_auth(auth), chunk.to_vec(), expected, permits.to_vec()),
+        )? {
             keyring::Resp::SnapshotWritten => Ok(()),
             _ => Err(ServiceError::Refused),
         }
     }
-    fn issuer_key(&self) -> Result<Vec<u8>, ServiceError> {
-        match self.keyring.call(&keyring::Req::GetIssuerKey)? {
+    fn issuer_key(&self, size_class: u8) -> Result<Vec<u8>, ServiceError> {
+        match self.keyring.call(&keyring::Req::GetIssuerKey(size_class))? {
             keyring::Resp::IssuerKey(k) => Ok(k),
             _ => Err(ServiceError::Refused),
         }
@@ -337,39 +361,59 @@ impl KeyringService for Remote {
         blinded: &[Vec<u8>],
         size_class: u8,
     ) -> Result<Vec<Vec<u8>>, ServiceError> {
-        match self.keyring.call(&keyring::Req::WithdrawTokens {
-            auth: wire_auth(auth),
-            blinded: blinded.to_vec(),
-            size_class,
-        })? {
+        match self.authorized(
+            auth,
+            keyring::Req::WithdrawTokens {
+                auth: wire_auth(auth),
+                blinded: blinded.to_vec(),
+                size_class,
+            },
+        )? {
             keyring::Resp::Tokens(t) => Ok(t),
             _ => Err(ServiceError::Refused),
         }
     }
-    fn put_request(&self, addr: &[u8; 32], blob: &[u8], token: &[u8]) -> Result<(), ServiceError> {
+    fn credit_refund(
+        &self,
+        auth: &Auth,
+        claim: TokenClaim,
+        token: &Token,
+    ) -> Result<(), ServiceError> {
+        match self.authorized(
+            auth,
+            keyring::Req::CreditRefund(wire_auth(auth), claim, token.clone()),
+        )? {
+            keyring::Resp::Credited => Ok(()),
+            _ => Err(ServiceError::Refused),
+        }
+    }
+    fn set_contacts(&self, auth: &Auth, permits: &[[u8; 32]]) -> Result<(), ServiceError> {
+        match self.authorized(
+            auth,
+            keyring::Req::SetContacts(wire_auth(auth), permits.to_vec()),
+        )? {
+            keyring::Resp::RequestDropped => Ok(()),
+            _ => Err(ServiceError::Refused),
+        }
+    }
+    fn put_request(&self, addr: &[u8; 32], blob: &[u8], permit: &[u8]) -> Result<(), ServiceError> {
         match self.keyring.call(&keyring::Req::PutRequest {
             addr: *addr,
             blob: blob.to_vec(),
-            token: token.to_vec(),
+            permit: permit.to_vec(),
         })? {
             keyring::Resp::RequestTaken => Ok(()),
             _ => Err(ServiceError::Refused),
         }
     }
     fn requests(&self, auth: &Auth) -> Result<Vec<(u32, Vec<u8>)>, ServiceError> {
-        match self
-            .keyring
-            .call(&keyring::Req::GetRequests(wire_auth(auth)))?
-        {
+        match self.authorized(auth, keyring::Req::GetRequests(wire_auth(auth)))? {
             keyring::Resp::Requests(r) => Ok(r),
             _ => Err(ServiceError::Refused),
         }
     }
     fn drop_request(&self, auth: &Auth, index: u32) -> Result<(), ServiceError> {
-        match self
-            .keyring
-            .call(&keyring::Req::DropRequest(wire_auth(auth), index))?
-        {
+        match self.authorized(auth, keyring::Req::DropRequest(wire_auth(auth), index))? {
             keyring::Resp::RequestDropped => Ok(()),
             _ => Err(ServiceError::Refused),
         }
@@ -424,15 +468,28 @@ impl ContentService for Remote {
             _ => Err(ServiceError::Refused),
         }
     }
+    fn refund_key(&self, class: Class, size_class: u8) -> Result<Vec<u8>, ServiceError> {
+        match self
+            .content_for(class)
+            .call(&content::Req::GetRefundKey(size_class))?
+        {
+            content::Resp::RefundKey(k) => Ok(k),
+            _ => Err(ServiceError::Refused),
+        }
+    }
     fn release(
         &self,
         class: Class,
         name: &[u8; 32],
         receipt: &[u8; 32],
+        size_class: u8,
+        blinded: &[u8],
     ) -> Result<Vec<u8>, ServiceError> {
         match self.content_for(class).call(&content::Req::Release {
             name: *name,
             receipt: *receipt,
+            size_class,
+            blinded: blinded.to_vec(),
         })? {
             content::Resp::Released { voucher, .. } => Ok(voucher),
             _ => Err(ServiceError::Refused),

@@ -34,7 +34,7 @@ pub mod tls;
 pub use channel::{Channel, ChannelError};
 pub use hysteria::{Availability, Frame, Hysteria, HysteriaError, Platform, Reassembler};
 pub use paced::{Immediate, Paced, RealTicker, Ticker};
-pub use push::{PushDisabled, Registration, Setting, Wake};
+pub use push::{Consent, PushDisabled, Registration, Setting, Wake, WarningNotShown};
 pub use route::{Class, Mode};
 // `TcpConnector` is defined at the bottom of this file.
 pub use socks::SocksError;

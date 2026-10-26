@@ -15,7 +15,7 @@ pub enum Req {
     Resolve {
         /// The exact name. No prefix, no pattern.
         name: String,
-        /// Today, so a lapsed name stops resolving. The service holds no clock.
+        /// Non-authoritative date hint; the server uses its own clock.
         today: u32,
     },
     /// Buy a voucher against a settled payment.
@@ -37,7 +37,7 @@ pub enum Req {
         claim: VoucherClaim,
         /// Its signature.
         voucher: Token,
-        /// Today.
+        /// Non-authoritative date hint; ignored for expiry.
         today: u32,
     },
     /// Renew a name.
@@ -48,7 +48,7 @@ pub enum Req {
         claim: VoucherClaim,
         /// Its signature.
         voucher: Token,
-        /// Today.
+        /// Non-authoritative date hint; ignored for expiry.
         today: u32,
     },
     /// Move a name to a key the current holder signs for.
@@ -60,19 +60,22 @@ pub enum Req {
         /// The current holder's signature.
         sig: Vec<u8>,
     },
-    /// The voucher-signing public key.
-    GetIssuerKey,
+    /// The voucher-signing public key for a provisioned price.
+    GetIssuerKey(u64),
+    /// Read the current transfer challenge.
+    TransferChallenge(String),
 }
 
 impl Operation for Req {
     fn op(&self) -> u8 {
         match self {
+            Req::TransferChallenge(_) => 6,
             Req::Resolve { .. } => 0,
             Req::Purchase { .. } => 1,
             Req::Register { .. } => 2,
             Req::Renew { .. } => 3,
             Req::Transfer { .. } => 4,
-            Req::GetIssuerKey => 5,
+            Req::GetIssuerKey(_) => 5,
         }
     }
 }
@@ -97,11 +100,14 @@ pub enum Resp {
     IssuerKey(Vec<u8>),
     /// Refused.
     Refused(Refusal),
+    /// Current transfer challenge, if the name exists.
+    TransferChallenge(Option<[u8; 32]>),
 }
 
 impl Operation for Resp {
     fn op(&self) -> u8 {
         match self {
+            Resp::TransferChallenge(_) => 7,
             Resp::Resolved(_) => 0,
             Resp::Signed(_) => 1,
             Resp::Registered => 2,

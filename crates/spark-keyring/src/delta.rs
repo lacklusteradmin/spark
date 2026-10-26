@@ -52,7 +52,7 @@ pub enum Delta {
     /// Record an upload and the receipt that releases it.
     AddUpload(Upload),
     /// Release an upload, refunding quota.
-    ReleaseUpload(SerName),
+    ReleaseUpload(crate::Receipt),
     /// Store unspent blind tokens.
     AddTokens(Vec<Vec<u8>>),
     /// Spend one token.
@@ -113,15 +113,18 @@ impl Delta {
                 {
                     // A maximum: a replayed delta must not hand a claimed slot
                     // back out, which would be a reused nonce.
-                    g.my_next = g.my_next.max(*seq + 1);
+                    g.my_next = g.my_next.max(seq.saturating_add(1));
                 }
             }
             Delta::SetMlsState(state) => k.mls_state = Some(state.clone()),
             Delta::AddUpload(u) => {
-                k.uploads.retain(|x| x.name != u.name);
+                k.uploads.retain(|x| x.receipt != u.receipt);
                 k.uploads.push(u.clone());
             }
-            Delta::ReleaseUpload(n) => k.uploads.retain(|u| u.name != *n),
+            Delta::ReleaseUpload(receipt) => {
+                k.uploads.retain(|u| u.receipt != *receipt);
+                k.refunds.retain(|r| r.receipt != *receipt);
+            }
             Delta::AddTokens(t) => {
                 for tok in t {
                     if !k.tokens.contains(tok) {

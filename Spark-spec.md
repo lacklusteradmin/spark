@@ -30,7 +30,7 @@ Create a room and invite one or a few people. A 1:1 is a room of two, implemente
 
 **Owners are a flat set.** The creator starts as one and may appoint others. Owners add and remove members, appoint and dismiss owners, and moderate per F6. There is no hierarchy and no second role, so a 1:1 is a room where both people are owners.
 
-An owner may leave only once another exists; the last owner can dissolve the room instead, removing it from every keyring. Dissolving deletes the room's own chunks, since nothing else can reference them, but shared media stays and quota is not refunded automatically — each uploader reclaims their space from their upload list. The client must say so, since users will assume dissolving cleans up.
+An owner may leave only once another exists; the last owner can dissolve the room instead, removing it from every keyring. Dissolving may delete room chunks for which write capabilities have been explicitly delegated, but shared media stays and quota is not refunded automatically — each uploader reclaims their space from their upload list. The client must say so, since users will assume dissolving cleans up.
 
 Simultaneous dismissals resolve by MLS commit order, which means the server picks; that is accepted, since the server orders all traffic anyway. If every owner disappears the room cannot be managed, active members leave, and no takeover mechanism is provided.
 
@@ -41,11 +41,21 @@ Simultaneous dismissals resolve by MLS commit order, which means the server pick
 Scope discipline is the actual anti-bloat rule: chat only, no third-party integrations, no voice or video. Structure alone guarantees nothing, since WeChat had rooms and became an economy anyway.
 
 ### F5. Reachability by approval
-A room is joined via a link or QR code exchanged out-of-band, or by name. **Names resolve but are not browsable:** an exact name produces a contact request, with no listing, autocomplete, or partial matching, so the namespace cannot be enumerated. Requests land in a pending tray and create no room until accepted.
+Users explicitly maintain contacts in the app. Names resolve exactly, with no listing,
+autocomplete or partial matching; resolving a name grants no inbox permission.
+A user approves a public identity and confidentially exchanges a contact card with
+that person. Each card contains a random, revocable inbox permit. Contacts and
+identities live only in the encrypted keyring; the service receives opaque permit
+hashes, bounded to 64 contacts, and stores at most one pending note per permit.
 
-Approval carries the spam defense. A regenerated throwaway key can send requests but reaches nobody who declines, and blocking becomes "don't let this key back in."
+Unknown or revoked permits are discarded before storage. Notes are signed and
+sealed to the recipient; the app verifies the sender against the approved contact
+before displaying anything. Contact approval does not automatically create a room.
 
-**Cost:** this moves Spark from unreachable to reachable-but-ignorable, which is where Telegram sits — a real concession made for convenience. Rare names stay effectively private while common ones will be guessed, so the client should say so at purchase. A naive lookup also lets the server see who searches for whom, which is the contact graph forming server-side, so name resolution must be blind or the leak must be documented and accepted. Out-of-band invites still travel through a channel Spark cannot protect.
+**Cost:** initiating contact requires an out-of-band exchange. The service sees the
+recipient address, permit count and repeat use of one permit, but not the contact's
+identity. Changing the permit list clears the pending tray. Out-of-band cards must
+be exchanged confidentially; the app is not an open stranger-request inbox.
 
 ### F6. Delete-for-everyone, sender only
 Two powers, deliberately split.
@@ -67,7 +77,7 @@ Pasted URLs are inert text: no parsing, previews, OAuth, or integrations (D7). A
 
 **Quota measures what a key currently holds, and only what it uploaded.** Viewing and receiving are free, so nobody can drain your allowance by posting a large video. Uploads are charged in full even when the chunk already exists, since a discount would let anyone probe what Spark holds.
 
-**Receipts free shared chunks without identities.** On upload the store issues an opaque random receipt, kept in the uploader's keyring; returning it releases the chunk and refunds quota. The store counts receipts per chunk and frees the bytes at zero, learning only how many unknown parties hold something. Media needs that count because it is shared; a room chunk cannot be referenced by any other room, so at dissolve the owner's client derives the names from the room key and has the server delete them outright. For room chunks the receipt is a quota instrument only.
+**Receipts free shared chunks without identities.** On upload the store issues an opaque random receipt, kept in the uploader's keyring; returning it releases the chunk and refunds quota. The store counts receipts per chunk and frees the bytes at zero, learning only how many unknown parties hold something. Media needs that count because it is shared; a room chunk cannot be referenced by any other room, so at dissolve a client may delete room chunks only with their write receipts, supplied by the uploaders if delegated. Knowledge of the room key or chunk name never grants deletion authority.
 
 **Uploads are listed, never judged.** The client shows everything a key uploaded, labelled with its room or marked unknown when that room is no longer visible. It deliberately does not decide what is unused: "no room references this" is indistinguishable from "a room references this but I left it," and the second is ordinary. A client that guessed would tell people to release content others are still reading.
 
@@ -123,7 +133,7 @@ This is the only mechanism that meaningfully attacks traffic-analysis correlatio
 Spark provides pseudonymity against the server's stored data: content is unreadable and there is no social graph at rest. It does not provide anonymity against a network-level adversary or against Apple and Google. What remains:
 
 - **W1 — IP at delivery (severe).** In the default mode media fetches still carry a real IP, and with Tor off the server sees it alongside `hash(pubkey)`. IP leads to ISP, subscriber, and name. → D2
-- **W2 — Push notifications (severe).** APNs and FCM tokens are bound to real Apple and Google accounts, bridging key to person and leaking timing. Users may disable push or avoid it via Hysteria mode, though accounts with no token form a visible group. → D3
+- **W2 — Push notifications (severe).** APNs and FCM tokens are bound to real Apple and Google accounts, bridging key to person and leaking timing. Push is off by default; users who turn it on are told the risk first, and Hysteria mode avoids the tradeoff. Accounts that opt in form a visible group. → D3
 - **W3 — Long-term linkability (structural).** The price of cloud recovery. Key and keyring are permanent, so one careless session without Tor retroactively deanonymizes the entire history. Fixing this means abandoning recovery.
 - **W4 — Traffic analysis.** Keyring updates still correlate in time across accounts in one room. Hysteria mode addresses the network-timing half; keyring-growth correlation remains open.
 - **W5 — The chosen Tor mode is itself a signal**, and three modes split users into three groups rather than two. → D2
@@ -157,7 +167,9 @@ Spark owns every username from the outset and sells them, so there is nothing to
 **Cost:** three modes fragment the anonymity set into three groups, so each is smaller and membership more distinguishing (W5). Mixed mode also lets an observer tie an IP to specific media chunks, and since those names are content-derived, that links a network address to identifiable content. Switching from off to on undoes nothing, because the server already recorded the IP against the keyring label.
 
 ### D3. Push notifications
-Push is on by default, using content-free and identity-free wake-up signals, with an in-app switch to turn it off and a warning that states the leak plainly.
+Push is **off by default**. A user may turn it on, using content-free and identity-free wake-up signals, but only after being shown a warning that states the leak plainly: Apple or Google learn when messages arrive, a server keeps a token tied to the user's Apple or Google account, Spark's encryption does not cover it, and turning it off later does not undo what was already seen.
+
+This reverses an earlier "on by default". Delivering a push requires holding a token against an account, and that token is a real-world identifier; build-notes §2 forbids servers storing those. Off by default is how both hold: no one's account is bridged to their identity unless they chose it knowing the cost.
 
 Off must mean never registering. Disabling notifications in the OS only stops them being displayed while the token persists, and a control that appears to close the leak while leaving it open is worse than none. Turning push off also costs real functionality — messages arrive on app open, or through background polling that iOS throttles by design. Hysteria mode avoids the tradeoff entirely by delivering over the connection it already holds.
 

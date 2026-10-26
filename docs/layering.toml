@@ -128,7 +128,7 @@ zone  = "io"
 # rather than a demo — so it sits at the top of the whole graph, not in the
 # client's half of it.
 deps  = ["spark-client", "spark-net", "spark-ffi", "spark-keyring", "spark-keyring-server", "spark-content-server", "spark-issuer", "spark-store", "spark-crypto", "spark-chunk", "spark-identity", "spark-transport", "spark-wire"]
-role  = "scripted verification harness. Not a user-facing product. Wires spark-client to in-process service instances and drives whole scenarios end to end."
+role  = "terminal chat client using spark-net sessions, plus scripted verification commands wiring spark-client to in-process services."
 
 # ---- servers: separate graph, never depended on by client crates ----
 
@@ -136,7 +136,7 @@ role  = "scripted verification harness. Not a user-facing product. Wires spark-c
 name  = "spark-store"
 layer = 9
 zone  = "io"
-deps  = []
+deps  = ["spark-crypto"]
 role  = "storage that describes its own shape. Every write records its field names, so Db::inventory reports what a server actually stored rather than what someone wrote down. This is what makes gate 5 checkable against the code instead of against a hand-written schema."
 
 [[crate]]

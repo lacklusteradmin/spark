@@ -167,7 +167,10 @@ fn every_slot_gets_a_distinct_name_key_and_nonce() {
         for seq in 0..8u64 {
             let slot = Slot::new(lane, seq);
             names.push(room::name(&r, slot));
-            let (_, chunk) = room::seal(&r, slot, b"same plaintext every time");
+            let mut nonce = [0; 24];
+            nonce[..16].copy_from_slice(lane.as_bytes());
+            nonce[16..].copy_from_slice(&seq.to_be_bytes());
+            let (_, chunk) = room::seal(&r, slot, &nonce, b"same plaintext every time");
             nonces.push(chunk.header().unwrap().nonce);
         }
     }
@@ -184,8 +187,8 @@ fn every_slot_gets_a_distinct_name_key_and_nonce() {
 fn the_same_message_at_two_slots_is_two_different_chunks() {
     // Otherwise the store could tell that a message was repeated.
     let r = root(5);
-    let (_, a) = room::seal(&r, Slot::new(LaneId::COMMIT, 0), b"ok");
-    let (_, b) = room::seal(&r, Slot::new(LaneId::COMMIT, 1), b"ok");
+    let (_, a) = room::seal(&r, Slot::new(LaneId::COMMIT, 0), &[7; 24], b"ok");
+    let (_, b) = room::seal(&r, Slot::new(LaneId::COMMIT, 1), &[7; 24], b"ok");
     assert_ne!(a.as_bytes(), b.as_bytes());
 }
 
@@ -193,7 +196,7 @@ fn the_same_message_at_two_slots_is_two_different_chunks() {
 fn a_room_chunk_opens_only_at_its_own_slot() {
     let r = root(5);
     let slot = Slot::new(LaneId::COMMIT, 3);
-    let (_, c) = room::seal(&r, slot, b"payload");
+    let (_, c) = room::seal(&r, slot, &[7; 24], b"payload");
     assert!(room::open(&r, slot, &c).is_ok());
     assert!(
         room::open(&r, slot.next(), &c).is_err(),

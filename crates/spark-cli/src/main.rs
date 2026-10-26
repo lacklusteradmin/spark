@@ -1,17 +1,8 @@
-//! scripted verification harness. Not a user-facing product.
-//!
-//! layer 11, zone `boundary` — see `docs/layering.toml`.
-//!
-//! `Spark-build-notes.md` §5: "the CLI is for scripted verification, not for
-//! users." So the commands here are not a chat interface. They stand up all three
-//! services in this process, drive whole scenarios through the real client, and
-//! print both what the participants see and what the servers were left holding.
-//!
-//! The second half is the point. Anyone can claim a messenger is private; this
-//! prints the servers' entire contents and shows the plaintext is not in them.
+//! Terminal chat client and scripted verification commands.
 
 mod certs;
 mod serve;
+mod terminal;
 mod wiring;
 
 use spark_client::Client;
@@ -60,6 +51,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
     let code = match cmd {
+        "init" | "contacts" | "contact-add" | "contact-remove" | "contact-note" | "inbox"
+        | "retry-upload" | "account" | "rooms" | "create" | "key-package" | "invite" | "join"
+        | "send" | "history" | "chat" | "share" | "fetch" => terminal::run(&args),
         "new" => cmd_new(),
         "demo" => cmd_demo(),
         "serve" => cmd_serve(&args[1..]),
@@ -78,14 +72,15 @@ fn main() {
 }
 
 fn usage() {
+    terminal::usage();
     println!(
-        "spark {} — verification harness, not a chat client\n\
+        "spark {} — diagnostic commands\n\
          \n\
            new     generate a recovery phrase and show the address it derives\n\
            demo    run two accounts through a conversation against real services,\n\
                    then print what those services were left holding\n\
            serve   run the three services on TCP and stay up\n\
-                   (spark serve [keyring-port content-port issuer-port])\n\
+                   (spark serve [keyring-port content-port issuer-port] [--data-dir DIR])\n\
            remote-demo\n\
                    the same conversation, over real sockets and the wire format\n\
                    (spark remote-demo [--cover [seconds]])\n\
@@ -133,16 +128,88 @@ fn spark_identity_root_salt() -> &'static [u8] {
 }
 
 fn cmd_serve(args: &[String]) -> i32 {
-    let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+    let mut ports = Vec::new();
+    let mut directory = std::path::PathBuf::from("spark-server-data");
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--data-dir" {
+            let Some(path) = args.next() else {
+                eprintln!("--data-dir requires a directory");
+                return 2;
+            };
+            directory = path.into();
+        } else if let Ok(port) = arg.parse::<u16>() {
+            ports.push(port);
+        } else {
+            eprintln!("invalid serve argument: {arg}");
+            return 2;
+        }
+    }
+    if !ports.is_empty() && ports.len() != 3 {
+        eprintln!("provide all three service ports");
+        return 2;
+    }
+    let port = |i: usize, default| ports.get(i).copied().unwrap_or(default);
     let mut rng = OsRandom;
-    let (k, c, i) = build_services(&mut rng);
-    let (tls, pin) = match server_tls() {
+    let setup = || -> Result<_, String> {
+        if !directory.exists() {
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(&directory).map_err(|e| e.to_string())?;
+        }
+        let meta = std::fs::symlink_metadata(&directory).map_err(|e| e.to_string())?;
+        if !meta.is_dir() {
+            return Err("data directory must not be a symlink".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o077 != 0 {
+                return Err("data directory must have mode 0700".into());
+            }
+        }
+        let lock_path = directory.join("server.lock");
+        if let Ok(meta) = std::fs::symlink_metadata(&lock_path) {
+            if !meta.is_file() {
+                return Err("invalid deployment lock".into());
+            }
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock = options.open(lock_path).map_err(|e| e.to_string())?;
+        lock.try_lock()
+            .map_err(|_| "deployment directory is already in use")?;
+        let open = |name| spark_store::Db::open(&directory.join(name)).map_err(|e| e.to_string());
+        let databases = [
+            open("keyring.sqlite")?,
+            open("content.sqlite")?,
+            open("issuer.sqlite")?,
+        ];
+        let id = certs::persistent(&open("tls.sqlite")?, "spark.local")?;
+        let pin = id.pin;
+        let key = rustls_pki_types::PrivateKeyDer::try_from(id.key).map_err(|e| e.to_string())?;
+        let tls = std::sync::Arc::new(
+            spark_transport::tls::server_config(id.cert, key).map_err(|e| e.to_string())?,
+        );
+        Ok((databases, tls, pin, lock))
+    };
+    let (databases, tls, pin, _deployment_lock) = match setup() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("could not build a server identity: {e}");
+            eprintln!("durable deployment: {e}");
             return 1;
         }
     };
+    let (k, c, i) = build_services_in(&mut rng, databases);
 
     let kl = match serve::keyring_service(&format!("127.0.0.1:{}", port(0, 9310)), tls.clone(), k) {
         Ok(l) => l,
@@ -156,17 +223,13 @@ fn cmd_serve(args: &[String]) -> i32 {
     let il =
         serve::issuer_service(&format!("127.0.0.1:{}", port(2, 9312)), tls, i).expect("issuer");
 
+    println!("Durable server data: {}", directory.display());
     println!("keyring   {}", kl.addr);
     println!("content   {}", cl.addr);
     println!("issuer    {}", il.addr);
     println!("\npin       {}\n", pin.to_hex());
     println!(
-        "Three listeners, three trust domains. Running them on one machine is a\n\
-         choice this command makes, not one the code assumes.\n\
-         \n\
-         Clients pin that key rather than asking a certificate authority. This one is\n\
-         generated fresh at startup, so the pin changes every restart — right for a\n\
-         harness, wrong for a deployment, which keeps its key. Ctrl-C to stop."
+        "SQLite WAL transactions and the TLS pin survive restart. Back up the private data directory. Ctrl-C to stop."
     );
     kl.join();
     0
@@ -188,19 +251,40 @@ fn build_services(
     std::sync::Arc<spark_content_server::Content>,
     std::sync::Arc<spark_issuer::Issuer>,
 ) {
+    build_services_in(
+        rng,
+        [
+            spark_store::Db::new(),
+            spark_store::Db::new(),
+            spark_store::Db::new(),
+        ],
+    )
+}
+
+fn build_services_in(
+    rng: &mut OsRandom,
+    databases: [spark_store::Db; 3],
+) -> (
+    std::sync::Arc<spark_keyring_server::Keyring>,
+    std::sync::Arc<spark_content_server::Content>,
+    std::sync::Arc<spark_issuer::Issuer>,
+) {
     use std::sync::Arc;
+    let [keyring_db, content_db, issuer_db] = databases;
+    let mut secret = [0; 32];
+    getrandom::fill(&mut secret).expect("challenge entropy");
     let keyring = Arc::new(spark_keyring_server::Keyring::new(
-        spark_store::Db::new(),
-        spark_crypto::Secret::new([0x5e; 32]),
+        keyring_db,
+        spark_crypto::Secret::new(secret),
         IssuerKey::generate(rng).expect("token key"),
     ));
-    keyring.set_minute(1);
     let content = Arc::new(spark_content_server::Content::with_keys(
-        spark_store::Db::new(),
+        content_db,
         keyring.accepted_keys(),
     ));
+    keyring.set_refund_keys(content.refund_keys());
     let issuer = Arc::new(spark_issuer::Issuer::new(
-        spark_store::Db::new(),
+        issuer_db,
         IssuerKey::generate(rng).expect("voucher key"),
     ));
     (keyring, content, issuer)

@@ -136,7 +136,7 @@ impl core::error::Error for InviteError {}
 /// The bytes are what the keyring service stores. It can see the recipient — that
 /// is unavoidable, since the request has to be delivered somewhere, and it is
 /// listed as open question §9.5 in the protocol. It cannot see the sender: the
-/// write is authorised by a blind token, and the sender's identity is inside the
+/// write is authorised by an opaque contact permit, and the sender's identity is inside the
 /// AEAD.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SealedRequest(Vec<u8>);
@@ -156,7 +156,7 @@ impl SealedRequest {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OpenRequest {
     /// Who is asking. Verified: the request carries their public identity, and
-    /// the AEAD only opens if it was sealed to the recipient's key.
+    /// the recipient checks the enclosed Ed25519 signature.
     pub from: PublicIdentity,
     /// A short note, so a request is not an anonymous knock.
     pub note: String,
@@ -180,7 +180,7 @@ fn schedule(shared: &Secret<32>) -> (Secret<32>, Nonce) {
 /// must never be reused, because the nonce is derived from the shared secret.
 pub fn seal_request(
     to: &KemPublic,
-    from: &PublicIdentity,
+    from: &crate::Identity,
     note: &str,
     invite_secret: Option<[u8; INVITE_SECRET_LEN]>,
     ephemeral: Secret<32>,
@@ -189,8 +189,8 @@ pub fn seal_request(
     let (key, nonce) = schedule(&eph.diffie_hellman(to));
 
     let mut plain = Vec::new();
-    plain.extend_from_slice(from.sign.as_bytes());
-    plain.extend_from_slice(from.kem.as_bytes());
+    plain.extend_from_slice(from.public().sign.as_bytes());
+    plain.extend_from_slice(from.public().kem.as_bytes());
     match invite_secret {
         Some(s) => {
             plain.push(1);
@@ -201,6 +201,14 @@ pub fn seal_request(
     plain.extend_from_slice(note.as_bytes());
 
     let eph_pub = *eph.public().as_bytes();
+    let signed = [
+        b"spark/v1/contact".as_slice(),
+        to.as_bytes(),
+        &eph_pub,
+        &plain,
+    ]
+    .concat();
+    plain.extend_from_slice(from.sign(&signed).as_bytes());
     let mut out = eph_pub.to_vec();
     out.extend_from_slice(&aead::seal(&key, &nonce, &eph_pub, &plain));
     SealedRequest(out)
@@ -209,8 +217,8 @@ pub fn seal_request(
 /// Open a contact request addressed to this identity.
 ///
 /// `expect_invite` is the secret behind the invites this account has issued. A
-/// request that presents it is marked `invited`; one that does not is still
-/// delivered, because the name path is a legitimate way to reach someone.
+/// request that presents it is marked `invited`. Inbox delivery independently
+/// requires an approved contact permit; the app also checks its contacts list.
 pub fn open_request(
     me: &crate::Identity,
     sealed: &SealedRequest,
@@ -225,13 +233,28 @@ pub fn open_request(
     let plain: Zeroizing<Vec<u8>> =
         aead::open(&key, &nonce, &eph_pub, &b[32..]).map_err(|_| RequestError::NotForMe)?;
 
-    if plain.len() < 65 {
+    if plain.len() < 65 + 64 {
         return Err(RequestError::Malformed);
     }
     let sign: [u8; 32] = plain[..32].try_into().expect("checked length");
     let kem: [u8; 32] = plain[32..64].try_into().expect("checked length");
     let sign = VerifyingKey::from_bytes(&sign).map_err(|_| RequestError::Malformed)?;
 
+    let (plain, signature) = plain.split_at(plain.len() - 64);
+    let signed = [
+        b"spark/v1/contact".as_slice(),
+        me.public().kem.as_bytes(),
+        &eph_pub,
+        plain,
+    ]
+    .concat();
+    sign.verify(
+        &signed,
+        &spark_crypto::Signature::from_bytes(
+            signature.try_into().map_err(|_| RequestError::Malformed)?,
+        ),
+    )
+    .map_err(|_| RequestError::NotForMe)?;
     let (invited, note_at) = match plain[64] {
         0 => (false, 65),
         1 => {

@@ -70,7 +70,7 @@ fn a_name_is_write_once() {
     // AEAD, not merely the ordering.
     let c = svc();
     let root: room::RoomRoot = Secret::new([1; 32]);
-    let (name, chunk) = room::seal(&root, Slot::new(LaneId::COMMIT, 0), b"first");
+    let (name, chunk) = room::seal(&root, Slot::new(LaneId::COMMIT, 0), &[7; 24], b"first");
 
     assert!(matches!(
         c.handle(Request::Put {
@@ -209,18 +209,12 @@ fn media_is_freed_at_zero_holders_and_room_chunks_by_deletion() {
             r => panic!("{r:?}"),
         }
     }
-    match c.handle(Request::Release {
-        name: *mname.as_bytes(),
-        receipt: rs[0],
-    }) {
+    match release(&c, *mname.as_bytes(), rs[0]) {
         Response::Released { freed, .. } => assert!(!freed, "freed while a holder remains"),
         r => panic!("{r:?}"),
     }
     assert!(c.db().has(T_CHUNK, &hexed(mname.as_bytes())));
-    match c.handle(Request::Release {
-        name: *mname.as_bytes(),
-        receipt: rs[1],
-    }) {
+    match release(&c, *mname.as_bytes(), rs[1]) {
         Response::Released { freed, .. } => assert!(freed, "bytes not freed at zero holders"),
         r => panic!("{r:?}"),
     }
@@ -236,26 +230,41 @@ fn media_is_freed_at_zero_holders_and_room_chunks_by_deletion() {
     });
     assert_eq!(
         c.handle(Request::Delete {
-            name: *m2.as_bytes()
+            name: *m2.as_bytes(),
+            receipt: [0; 32]
         }),
-        Response::Refused(Refusal::NotDeletable)
+        Response::Refused(Refusal::BadReceipt)
     );
 
     // A room chunk is deleted outright at dissolve.
     let root: room::RoomRoot = Secret::new([1; 32]);
-    let (rname, rchunk) = room::seal(&root, Slot::new(LaneId::COMMIT, 0), b"history");
-    c.handle(Request::Put {
+    let (rname, rchunk) = room::seal(&root, Slot::new(LaneId::COMMIT, 0), &[7; 24], b"history");
+    let result = c.handle(Request::Put {
         name: *rname.as_bytes(),
         chunk: rchunk.as_bytes().to_vec(),
         claim: tok(6).0,
         token: tok(6).1,
     });
+    let Response::Stored { receipt } = result else {
+        panic!("upload")
+    };
     assert_eq!(
         c.handle(Request::Delete {
+            receipt,
             name: *rname.as_bytes()
         }),
         Response::Deleted
     );
+    assert_eq!(
+        c.handle(Request::Get {
+            name: *rname.as_bytes()
+        }),
+        Response::Refused(Refusal::NotFound)
+    );
+    assert!(matches!(
+        release(&c, *rname.as_bytes(), receipt),
+        Response::Released { freed: true, .. }
+    ));
     assert!(!c.db().has(T_CHUNK, &hexed(rname.as_bytes())));
 }
 
@@ -293,4 +302,22 @@ fn reads_carry_nothing_and_are_answered_to_anyone() {
         c.handle(Request::Head { name: [9; 32] }),
         Response::Exists(false)
     );
+}
+
+fn release(c: &Content, name: [u8; 32], receipt: [u8; 32]) -> Response {
+    let Response::RefundKey(der) = c.handle(Request::GetRefundKey(20)) else {
+        panic!()
+    };
+    let pk = IssuerPublic::from_der(&der).unwrap();
+    let claim = TokenClaim {
+        serial: spark_crypto::sha256(&receipt),
+        size_class: 20,
+    };
+    let (blinded, _) = pk.blind(&mut Fixed(21), &claim.refund_message()).unwrap();
+    c.handle(Request::Release {
+        name,
+        receipt,
+        size_class: 20,
+        blinded,
+    })
 }

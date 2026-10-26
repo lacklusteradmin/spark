@@ -1,8 +1,7 @@
 //! Vector clocks. `docs/protocol.md` §5.
 //!
-//! The clock is the sync mechanism, not a debugging aid. Reading any one new
-//! chunk tells a client every lane's head as of that write, so discovery does not
-//! require blindly probing each lane.
+//! Signed causal observations used for ordering. A peer's claimed sequence is
+//! never a trusted allocation size or an unbounded discovery target.
 
 use serde::{Deserialize, Serialize};
 use spark_chunk::LaneId;

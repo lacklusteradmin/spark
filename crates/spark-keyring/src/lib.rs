@@ -66,10 +66,16 @@ pub struct Keyring {
     pub rooms: Vec<Room>,
     /// Everything uploaded and still charged against quota.
     pub uploads: Vec<Upload>,
+    /// Refund operations saved before consuming their receipts.
+    pub refunds: Vec<model::PendingRefund>,
+    /// Upload to resume after interruption before accepting another send.
+    pub pending_upload: Option<model::PendingUpload>,
     /// Unspent blind storage tokens.
     pub tokens: Vec<Vec<u8>>,
     /// Names held, with their paid-until dates.
     pub names: Vec<HeldName>,
+    /// Contacts explicitly approved in the app.
+    pub contacts: Vec<model::Contact>,
     /// Contact requests awaiting a decision.
     pub pending: Vec<String>,
     /// The MLS provider's serialized storage, for every room at once.

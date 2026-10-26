@@ -21,7 +21,7 @@ pub enum Req {
     /// Append a delta.
     PutDelta(Auth, Vec<u8>),
     /// Replace the snapshot.
-    PutSnapshot(Auth, Vec<u8>),
+    PutSnapshot(Auth, Vec<u8>, (Option<[u8; 32]>, u32), Vec<[u8; 32]>),
     /// Read quota.
     GetQuota(Auth),
     /// Exchange quota for blind signatures over already-blinded claims.
@@ -34,24 +34,24 @@ pub enum Req {
         size_class: u8,
     },
     /// Credit a refund voucher.
-    CreditRefund(Auth, Vec<u8>, u64),
-    /// Leave a contact request. **Unauthenticated**: the sender is by definition
-    /// not the holder of the recipient's key, so there is nothing they could sign
-    /// that this service should accept. Spam is priced instead of identified.
+    CreditRefund(Auth, spark_crypto::TokenClaim, spark_crypto::Token),
+    /// Leave a request using an opaque permit explicitly issued by the recipient.
     PutRequest {
         /// Where to leave it.
         addr: [u8; 32],
         /// The sealed request.
         blob: Vec<u8>,
-        /// A blind token, spendable once.
-        token: Vec<u8>,
+        /// A recipient-issued 32-byte inbox permit.
+        permit: Vec<u8>,
     },
     /// Read the tray.
     GetRequests(Auth),
     /// Discard one request, accepted or declined alike.
     DropRequest(Auth, u32),
     /// The token issuer's public key. Unauthenticated: it is public.
-    GetIssuerKey,
+    GetIssuerKey(u8),
+    /// Replace the bounded list of opaque contact authorization hashes.
+    SetContacts(Auth, Vec<[u8; 32]>),
 }
 
 impl Operation for Req {
@@ -68,7 +68,8 @@ impl Operation for Req {
             Req::PutRequest { .. } => 8,
             Req::GetRequests(_) => 9,
             Req::DropRequest(..) => 10,
-            Req::GetIssuerKey => 11,
+            Req::GetIssuerKey(_) => 11,
+            Req::SetContacts(..) => 12,
         }
     }
 }
@@ -148,4 +149,33 @@ pub enum Refusal {
     OverQuota,
     /// That refund voucher has already been credited.
     VoucherSpent,
+}
+
+impl Req {
+    /// Mutable authentication proof, absent on public operations.
+    pub fn auth_mut(&mut self) -> Option<&mut Auth> {
+        match self {
+            Self::GetSnapshot(a)
+            | Self::GetDeltas(a)
+            | Self::PutDelta(a, _)
+            | Self::PutSnapshot(a, ..)
+            | Self::GetQuota(a)
+            | Self::WithdrawTokens { auth: a, .. }
+            | Self::CreditRefund(a, ..)
+            | Self::GetRequests(a)
+            | Self::DropRequest(a, _)
+            | Self::SetContacts(a, _) => Some(a),
+            _ => None,
+        }
+    }
+    /// Canonical request transcript, including operation, body, address, nonce and challenge.
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut request = self.clone();
+        if let Some(auth) = request.auth_mut() {
+            auth.sig.clear();
+        }
+        let mut bytes = b"spark/v2/keyring-request".to_vec();
+        bytes.extend(postcard::to_allocvec(&request).expect("wire request encoding"));
+        bytes
+    }
 }

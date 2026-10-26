@@ -114,7 +114,9 @@ fn a_paced_service_answers_in_the_same_time_whatever_the_work_cost() {
 fn work_beyond_the_tick_is_counted_rather_than_hidden() {
     // Past one tick the number of ticks varies with the input and the channel is
     // back, coarsened. The service must be able to alert on that.
-    let is = issuer::Issuer::new(Db::new(), IssuerKey::generate(&mut Fixed(77)).unwrap());
+    let is = issuer::Issuer::new(Db::new(), IssuerKey::generate(&mut Fixed(77)).unwrap())
+        .with_payment_verifier(std::sync::Arc::new(common::TestPayments))
+        .with_day_clock(std::sync::Arc::new(|| 20_000));
     let clock = FakeClock::with_work(&[10_000, 60_000_000]); // second exceeds 50 ms
     for _ in 0..2 {
         is.handle_paced(&clock, issuer::Request::Resolve("nobody".into(), 20_000));
@@ -126,7 +128,9 @@ fn work_beyond_the_tick_is_counted_rather_than_hidden() {
 fn pacing_does_not_change_the_answers() {
     // `handle` stays public and unpaced so behaviour can be tested without a
     // clock. The two must agree, or the tested path is not the shipped one.
-    let is = issuer::Issuer::new(Db::new(), IssuerKey::generate(&mut Fixed(77)).unwrap());
+    let is = issuer::Issuer::new(Db::new(), IssuerKey::generate(&mut Fixed(77)).unwrap())
+        .with_payment_verifier(std::sync::Arc::new(common::TestPayments))
+        .with_day_clock(std::sync::Arc::new(|| 20_000));
     let clock = FakeClock::with_work(&[1_000, 1_000]);
     let a = is.handle(issuer::Request::Resolve("nobody".into(), 20_000));
     let b = is.handle_paced(&clock, issuer::Request::Resolve("nobody".into(), 20_000));
@@ -137,7 +141,9 @@ fn pacing_does_not_change_the_answers() {
 fn a_voucher_survives_a_rotation_of_the_key_that_signed_it() {
     // Rotation bounds how long a recovered key can mint. It must not invalidate
     // vouchers people already bought, or nobody will ever rotate.
-    let is = issuer::Issuer::new(Db::new(), IssuerKey::generate(&mut Fixed(77)).unwrap());
+    let is = issuer::Issuer::new(Db::new(), IssuerKey::generate(&mut Fixed(77)).unwrap())
+        .with_payment_verifier(std::sync::Arc::new(common::TestPayments))
+        .with_day_clock(std::sync::Arc::new(|| 20_000));
     let claim = VoucherClaim {
         serial: [3; 32],
         grant: Grant::NameMonths {
@@ -145,7 +151,8 @@ fn a_voucher_survives_a_rotation_of_the_key_that_signed_it() {
             premium: false,
         },
     };
-    let pk = is.signing_public();
+    is.provision_price(claim.price(), IssuerKey::generate(&mut Fixed(177)).unwrap());
+    let pk = is.signing_public_for(claim.price()).unwrap();
     let (blinded, b) = pk.blind(&mut Fixed(5), &claim.encode()).unwrap();
     let issuer::Response::Signed(sig) = is.handle(issuer::Request::Purchase {
         blinded,
@@ -156,7 +163,8 @@ fn a_voucher_survives_a_rotation_of_the_key_that_signed_it() {
     };
     let voucher = pk.finalize(b, &sig, &claim.encode()).unwrap();
 
-    is.rotate_signing_key(IssuerKey::generate(&mut Fixed(78)).unwrap());
+    is.rotate_price_key(claim.price(), IssuerKey::generate(&mut Fixed(78)).unwrap());
+    is.rotate_signing_key(IssuerKey::generate(&mut Fixed(79)).unwrap());
     assert_eq!(
         is.accepted_keys().len(),
         2,
@@ -192,12 +200,12 @@ fn rotating_changes_the_key_tokens_are_signed_with() {
 
     assert_ne!(before, after, "rotation did not change the signing key");
     assert_eq!(
-        ks.accepted_keys().len(),
+        ks.accepted_keys().keys(20).len(),
         2,
         "the retired key must still verify"
     );
     assert_eq!(
-        ks.accepted_keys()[0].to_der().unwrap(),
+        ks.accepted_keys().keys(20)[0].to_der().unwrap(),
         after,
         "newest key is not first"
     );
@@ -210,8 +218,8 @@ fn rotating_changes_the_key_tokens_are_signed_with() {
 /// used — for blinding, unblinding and verification, none of which touch a secret
 /// — so the vulnerable crate is still in the dependency graph and `cargo-deny`
 /// still has to be told about it. What makes that ignore honest is this test: the
-/// only method Spark calls on the library's `SecretKey` is `components()`, which
-/// copies out bytes and computes nothing.
+/// allowed secret-key methods only expose components, serialize PKCS#8, or derive
+/// the public key. Online private exponentiation uses the constant-time path.
 ///
 /// Written against the source rather than the dependency graph because that is
 /// where the mistake would be made. Reintroducing the vulnerable path is one line
@@ -297,12 +305,12 @@ fn no_secret_key_operation_goes_through_the_unpatched_rsa_crate() {
         args.get(1).copied().unwrap_or("nothing")
     );
     for call in &uses {
-        assert_eq!(
-            *call, "components",
-            "spark-crypto calls `{call}` on the blind-RSA secret key. Every method \
-             on it other than `components` performs the private-key exponentiation \
-             inside the `rsa` crate, which is not constant-time (RUSTSEC-2023-0071) \
-             and has no patched version. Use `blind::ct::modexp` instead."
+        // `to_der` is PKCS#8 serialization only (upstream SecretKey::to_der);
+        // it performs no signing/exponentiation. Persisted deployment keys need
+        // this operation. Keep every computational private-key method forbidden.
+        assert!(
+            matches!(*call, "components" | "to_der" | "public_key"),
+            "unexpected secret-key operation `{call}`; private exponentiation must use blind::ct::modexp"
         );
     }
 }

@@ -87,7 +87,7 @@ fn phase_one() -> (Servers, Addr) {
     // Append the history. Each slot is written exactly once, which is what makes
     // the derived nonces safe.
     for (i, m) in MESSAGES.iter().enumerate() {
-        let (name, chunk) = room::seal(&root, Slot::new(lane, i as u64), m.as_bytes());
+        let (name, chunk) = room::seal(&root, Slot::new(lane, i as u64), &[7; 24], m.as_bytes());
         servers.put(name, chunk);
     }
 
@@ -100,6 +100,7 @@ fn phase_one() -> (Servers, Addr) {
     k.apply(&Delta::UpsertRoom(Room {
         id: room_id,
         generations: vec![Generation {
+            members: vec![],
             epoch: 0,
             root,
             my_next: 0,
@@ -279,6 +280,7 @@ fn an_out_of_order_delta_cannot_rewind_a_lane() {
     k.apply(&Delta::UpsertRoom(Room {
         id: room_id,
         generations: vec![Generation {
+            members: vec![],
             epoch: 0,
             root: Secret::new([3; 32]),
             my_next: 0,

@@ -177,7 +177,7 @@ impl Room {
             .map_err(|_| RoomError::Mls)?
             .into_group(provider)
             .map_err(|_| RoomError::Mls)?;
-        OwnerSet::from_group(&group)?;
+        validate_group(&group)?;
         Ok(Self { group })
     }
 
@@ -307,6 +307,14 @@ impl Room {
         kp: &KeyPackage,
     ) -> Result<Commit, RoomError> {
         self.require_owner()?;
+        validate_leaf(kp.leaf_node())?;
+        if self
+            .members()
+            .iter()
+            .any(|k| k.as_bytes().as_slice() == kp.leaf_node().credential().serialized_content())
+        {
+            return Err(RoomError::Mls);
+        }
         let (commit, welcome, _) = self
             .group
             .add_members(provider, signer, core::slice::from_ref(kp))
@@ -337,22 +345,25 @@ impl Room {
             return Err(RoomError::LastOwner);
         }
         let leaf = self.leaf_of(who)?;
-        let (commit, _, _) = self
+        let next = owners.without(who);
+        let bundle = self
             .group
-            .remove_members(provider, signer, &[leaf])
+            .commit_builder()
+            .consume_proposal_store(false)
+            .propose_removals([leaf])
+            .propose_group_context_extensions(next.extensions())
+            .map_err(|_| RoomError::Mls)?
+            .load_psks(provider.storage())
+            .map_err(|_| RoomError::Mls)?
+            .build(provider.rand(), provider.crypto(), signer, |_| true)
+            .map_err(|_| RoomError::Mls)?
+            .stage_commit(provider)
             .map_err(|_| RoomError::Mls)?;
         self.group
             .merge_pending_commit(provider)
             .map_err(|_| RoomError::Mls)?;
-        if owners.contains(who) {
-            let c = self.set_owners(provider, signer, &owners.without(who))?;
-            return Ok(Commit {
-                commit: c.commit,
-                welcome: None,
-            });
-        }
         Ok(Commit {
-            commit: ser(&commit)?,
+            commit: ser(bundle.commit())?,
             welcome: None,
         })
     }
@@ -448,13 +459,37 @@ impl Room {
         signer: &Signer,
     ) -> Result<Commit, RoomError> {
         self.require_owner()?;
-        let (commit, welcome, _) = self
+        let mut next = self.owners()?;
+        for p in self.group.pending_proposals() {
+            self.validate_proposal(p)?;
+            if let Proposal::Remove(r) = p.proposal() {
+                if let Some(m) = self.group.members().find(|m| m.index == r.removed()) {
+                    let key = VerifyingKey::from_bytes(
+                        &m.signature_key.try_into().map_err(|_| RoomError::Mls)?,
+                    )
+                    .map_err(|_| RoomError::Mls)?;
+                    next = next.without(&key);
+                }
+            }
+        }
+        if next.is_empty() {
+            return Err(RoomError::LastOwner);
+        }
+        let bundle = self
             .group
-            .commit_to_pending_proposals(provider, signer)
+            .commit_builder()
+            .propose_group_context_extensions(next.extensions())
+            .map_err(|_| RoomError::Mls)?
+            .load_psks(provider.storage())
+            .map_err(|_| RoomError::Mls)?
+            .build(provider.rand(), provider.crypto(), signer, |_| true)
+            .map_err(|_| RoomError::Mls)?
+            .stage_commit(provider)
             .map_err(|_| RoomError::Mls)?;
         self.group
             .merge_pending_commit(provider)
             .map_err(|_| RoomError::Mls)?;
+        let (commit, welcome, _) = bundle.into_messages();
         Ok(Commit {
             commit: ser(&commit)?,
             welcome: welcome.as_ref().map(ser).transpose()?,
@@ -503,6 +538,64 @@ impl Room {
             .map_err(|_| RoomError::Mls)?)
     }
 
+    fn sender_key(&self, sender: &Sender) -> Result<VerifyingKey, RoomError> {
+        let Sender::Member(index) = sender else {
+            return Err(RoomError::NotAMember);
+        };
+        let m = self
+            .group
+            .members()
+            .find(|m| &m.index == index)
+            .ok_or(RoomError::NotAMember)?;
+        if m.credential.serialized_content() != m.signature_key {
+            return Err(RoomError::Mls);
+        }
+        VerifyingKey::from_bytes(&m.signature_key.try_into().map_err(|_| RoomError::Mls)?)
+            .map_err(|_| RoomError::Mls)
+    }
+
+    fn validate_proposal(&self, p: &QueuedProposal) -> Result<(), RoomError> {
+        let from = self.sender_key(p.sender())?;
+        let owner = self.owners()?.contains(&from);
+        match p.proposal() {
+            Proposal::Add(a) if owner => validate_leaf(a.key_package().leaf_node()),
+            Proposal::Remove(r) => {
+                let self_leave = self.leaf_of(&from)? == r.removed();
+                if !owner && !self_leave {
+                    return Err(RoomError::NotAnOwner);
+                }
+                if self_leave && owner && self.owners()?.len() == 1 {
+                    return Err(RoomError::LastOwner);
+                }
+                Ok(())
+            }
+            Proposal::Update(u) => {
+                validate_leaf(u.leaf_node())?;
+                if u.leaf_node().credential().serialized_content() != from.as_bytes() {
+                    return Err(RoomError::Mls);
+                }
+                Ok(())
+            }
+            Proposal::GroupContextExtensions(g) if owner => {
+                let ext = g.extensions().unknown(OWNERS_EXT).ok_or(RoomError::Mls)?;
+                if OwnerSet::decode(&ext.0)?.is_empty() {
+                    return Err(RoomError::LastOwner);
+                }
+                // Spark supports no external senders, external joins, PSKs or reinitialization.
+                if g.extensions().iter().any(|e| {
+                    !matches!(
+                        e,
+                        Extension::RequiredCapabilities(_) | Extension::Unknown(OWNERS_EXT, _)
+                    )
+                }) {
+                    return Err(RoomError::Unsupported);
+                }
+                Ok(())
+            }
+            _ => Err(RoomError::NotAnOwner),
+        }
+    }
+
     /// Process an inbound message: an application message, or a commit to apply.
     pub fn process<P: OpenMlsProvider>(
         &mut self,
@@ -517,15 +610,66 @@ impl Room {
             .group
             .process_message(provider, pm)
             .map_err(|_| RoomError::Mls)?;
+        let sender = processed.sender().clone();
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(m) => Ok(Event::Message(m.into_bytes())),
             ProcessedMessageContent::StagedCommitMessage(sc) => {
+                let author = self.sender_key(&sender)?;
+                if !self.owners()?.contains(&author) {
+                    return Err(RoomError::NotAnOwner);
+                }
+                for p in sc.queued_proposals() {
+                    self.validate_proposal(p)?;
+                }
+                if let Some(leaf) = sc.update_path_leaf_node() {
+                    validate_leaf(leaf)?;
+                    if leaf.credential().serialized_content() != author.as_bytes() {
+                        return Err(RoomError::Mls);
+                    }
+                }
+                let ext = sc
+                    .group_context()
+                    .extensions()
+                    .unknown(OWNERS_EXT)
+                    .ok_or(RoomError::Mls)?;
+                let owners = OwnerSet::decode(&ext.0)?;
+                let mut members: Vec<_> = self
+                    .group
+                    .members()
+                    .filter(|m| {
+                        !sc.remove_proposals()
+                            .any(|p| p.remove_proposal().removed() == m.index)
+                    })
+                    .map(|m| m.credential.serialized_content().to_vec())
+                    .collect();
+                members.extend(sc.add_proposals().map(|p| {
+                    p.add_proposal()
+                        .key_package()
+                        .leaf_node()
+                        .credential()
+                        .serialized_content()
+                        .to_vec()
+                }));
+                if owners.is_empty()
+                    || owners
+                        .keys()
+                        .any(|k| !members.iter().any(|m| m == k.as_bytes()))
+                {
+                    return Err(RoomError::LastOwner);
+                }
+                let mut unique = members.clone();
+                unique.sort();
+                unique.dedup();
+                if unique.len() != members.len() {
+                    return Err(RoomError::Mls);
+                }
                 self.group
                     .merge_staged_commit(provider, *sc)
                     .map_err(|_| RoomError::Mls)?;
                 Ok(Event::Applied(self.owners()?))
             }
             ProcessedMessageContent::ProposalMessage(p) => {
+                self.validate_proposal(&p)?;
                 self.group
                     .store_pending_proposal(provider.storage(), *p)
                     .map_err(|_| RoomError::Mls)?;
@@ -565,6 +709,37 @@ impl core::fmt::Debug for Dissolution {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Dissolution({} generations)", self.generations)
     }
+}
+
+fn validate_leaf(leaf: &LeafNode) -> Result<(), RoomError> {
+    let identity = leaf.credential().serialized_content();
+    if identity != leaf.signature_key().as_slice() {
+        return Err(RoomError::Mls);
+    }
+    let bytes: [u8; 32] = identity.try_into().map_err(|_| RoomError::Mls)?;
+    VerifyingKey::from_bytes(&bytes).map_err(|_| RoomError::Mls)?;
+    Ok(())
+}
+
+fn validate_group(group: &MlsGroup) -> Result<(), RoomError> {
+    let owners = OwnerSet::from_group(group)?;
+    let mut ids = std::collections::BTreeSet::new();
+    for m in group.members() {
+        if m.credential.serialized_content() != m.signature_key
+            || m.signature_key.len() != 32
+            || !ids.insert(m.signature_key)
+        {
+            return Err(RoomError::Mls);
+        }
+    }
+    if owners.is_empty()
+        || owners
+            .keys()
+            .any(|k| !ids.contains(k.as_bytes().as_slice()))
+    {
+        return Err(RoomError::LastOwner);
+    }
+    Ok(())
 }
 
 fn ser<T: TlsSerialize>(m: &T) -> Result<Vec<u8>, RoomError> {

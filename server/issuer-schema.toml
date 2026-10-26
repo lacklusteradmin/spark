@@ -4,10 +4,10 @@
 service = "issuer_service"
 [[table]]
 name = "name_mapping"
-fields = ["name", "name_pubkey", "paid_until_day", "name_tier"]
+fields = ["name", "name_pubkey", "paid_until_day", "name_tier", "transfer_nonce"]
 [[table]]
 name = "payment_spent"
-fields = ["spent_payment_ref"]
+fields = ["spent_payment_ref", "payment_request_hash", "payment_response"]
 [[table]]
 name = "issuance"
 fields = ["blind_sig_count"]

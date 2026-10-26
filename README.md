@@ -9,13 +9,27 @@ A private, phone-number-free messenger that does one thing: chat.
 - `docs/layering.toml` — the crate graph, enforced rather than described.
 - `docs/permitted-knowledge.toml` — what each server may persist. Deny by default.
 
+## Terminal client
+
+Spark now also has a usable terminal client, before mobile development. Build
+with `cargo build -p spark-cli`, then run `target/debug/spark help`.
+Commands cover saved profiles, rooms, invitations, messages, live chat, and
+attachments. See [the CLI walkthrough (中文)](docs/cli-zh.md).
+
+Profiles currently store the recovery phrase **unencrypted**, protected by Unix
+owner-only permissions. `serve --data-dir DIR` uses SQLite WAL transactions and
+persists its mint keys and TLS identity in a private directory (default:
+`spark-server-data`). Server restart recovery is covered by a real subprocess
+test. Remaining protocol limitations are tracked in
+[the security review](docs/security-review-2026-09-11.md).
+
 ## Status
 
 **All twelve stages done, and it runs.** Every crate is implemented; there are no
 stubs left.
 
 ```bash
-cargo test --workspace                    # 233 tests
+cargo test --workspace                    # includes CLI subprocess tests
 scripts/verify-reproducible.sh            # 251 artifacts byte-identical across two builds
 cargo run -p spark-cli -- demo            # two accounts in one process, and what the servers kept
 cargo run -p spark-cli -- remote-demo     # the same, over real sockets
@@ -197,14 +211,14 @@ threat must say what remains *after* the mitigation, and every one must point at
 where the user is told. A threat with no answer fails the gate, because there is
 deliberately no third status.
 
-**Stage 12 produced one finding, and it blocks push.** `Spark-build-notes.md` §2
-says the servers may never store real-world identifiers. `Spark-spec.md` D3 says
-push is on by default. Delivering a push requires *something* to hold a mapping
+**Stage 12 produced one finding, and it has been decided.** `Spark-build-notes.md`
+§2 says the servers may never store real-world identifiers. `Spark-spec.md` D3 said
+push was on by default. Delivering a push requires *something* to hold a mapping
 from an account to an Apple or Google token, and a push token is a real-world
-identifier. Both cannot hold as absolutes. No delivery service exists yet and none
-should be built until this is resolved — the options are a fourth trust domain
-holding that mapping and nothing else, push being opt-in rather than default, or
-no push. It is recorded in W2 rather than left to be discovered mid-implementation.
+identifier, so both could not hold as absolutes. The decision: **push is off by
+default**, and turning it on means being told the risk first. D3 now says so, and
+W2 records it. No delivery service exists yet; when one is built it holds that
+mapping only for accounts that opted in.
 
 ## The envelope
 
@@ -281,6 +295,21 @@ So `register` takes the platform's minting call as a closure and does not invoke
 it when the setting is off. A token that was never minted cannot persist, cannot
 leak through a later bug, and cannot be found on the device afterwards. The test
 checks that the closure was never called, not that no token came back.
+
+**Off by default, and loud to turn on.** `Setting::default()` is `Off`.
+`Setting::On` carries a `Consent`, whose only constructor takes back the warning
+text the interface displayed and refuses anything that is not exactly
+`ENABLE_WARNING` — not a prefix, not a restyled copy, not an older wording. So
+there is no route to "on" through an API that never mentioned the risk, and an
+interface still showing a previous warning fails closed when the wording changes.
+A boolean "user agreed" would let the interface assert the user saw it; this makes
+it demonstrate it.
+
+The warning itself is held clause by clause: who learns something (Apple or
+Google), what (when messages arrive), what ties it to a person (a token bound to
+their account, kept by a server), that Spark's encryption is no defence, and that
+turning push off later does not undo what was already seen. That last clause is
+the one a softer warning would drop.
 
 ## Cover traffic
 
@@ -445,7 +474,7 @@ would rejoin it through request timing and operational logs.
 
 | | Knows | Authenticates by |
 |---|---|---|
-| Keyring | `hash(pubkey)`, blob size, mtime, quota and rate counters | Ed25519 challenge — stateless, an HMAC of the address under a server secret and the minute |
+| Keyring | `hash(pubkey)`, blob size, mtime, quota and rate counters | Ed25519 signature over the complete request, minute challenge, and single-use nonce |
 | Content | chunk name, bytes, receipt count, spent token serials. **No accounts** | writes: a blind token. reads: nothing at all |
 | Issuer | name → key, paid-until, issuance count | blind (the voucher, not the caller) |
 

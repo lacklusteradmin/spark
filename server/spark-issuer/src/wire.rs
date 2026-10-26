@@ -19,6 +19,7 @@ fn key64(v: Vec<u8>) -> Option<[u8; 64]> {
 
 fn from_wire(r: w::Req) -> Option<Request> {
     Some(match r {
+        w::Req::TransferChallenge(name) => Request::TransferChallenge(name),
         w::Req::Resolve { name, today } => Request::Resolve(name, today),
         w::Req::Purchase {
             blinded,
@@ -58,13 +59,14 @@ fn from_wire(r: w::Req) -> Option<Request> {
             new_key: key64(new_key)?,
             sig: sig.try_into().ok()?,
         },
-        w::Req::GetIssuerKey => Request::IssuerKey,
+        w::Req::GetIssuerKey(price) => Request::IssuerKey(price),
     })
 }
 
 impl From<Response> for w::Resp {
     fn from(r: Response) -> Self {
         match r {
+            Response::TransferChallenge(nonce) => w::Resp::TransferChallenge(nonce),
             Response::Resolved(k) => w::Resp::Resolved(k.map(|x| x.to_vec())),
             Response::Signed(s) => w::Resp::Signed(s),
             Response::Registered => w::Resp::Registered,

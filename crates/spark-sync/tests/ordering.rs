@@ -17,6 +17,8 @@ fn signer(b: u8) -> SigningKey {
 
 fn signed(slot: Slot, epoch: u64, body: &str, sk: &SigningKey) -> Signed {
     Signed::new(
+        &[9; 32],
+        &Clock::new(),
         slot,
         epoch,
         body.as_bytes().to_vec(),
@@ -267,31 +269,39 @@ fn authorship_is_verified_not_assumed() {
     // The archive is confidential because of the chunk AEAD; it is *attributable*
     // because of this signature. Without the check, anyone who could write a
     // chunk could write it as anyone.
-    let l = lane(1);
-    let slot = Slot::new(l, 3);
     let sk = signer(11);
+    let l = spark_chunk::LaneId::message(&sk.verifying_key());
+    let slot = Slot::new(l, 3);
     let s = signed(slot, 5, "genuine", &sk);
-    assert_eq!(s.verify(slot, 5).unwrap(), sk.verifying_key());
+    assert_eq!(
+        s.verify(&[9; 32], &Clock::new(), slot, 5).unwrap(),
+        sk.verifying_key()
+    );
 
     // A different slot: the signature covers lane and seq, so a message cannot be
     // lifted out of one slot and replayed into another.
     assert_eq!(
-        s.verify(Slot::new(l, 4), 5).unwrap_err(),
+        s.verify(&[9; 32], &Clock::new(), Slot::new(l, 4), 5)
+            .unwrap_err(),
         EntryError::BadSignature
     );
     assert_eq!(
-        s.verify(Slot::new(lane(2), 3), 5).unwrap_err(),
+        s.verify(&[9; 32], &Clock::new(), Slot::new(lane(2), 3), 5)
+            .unwrap_err(),
         EntryError::BadSignature
     );
     // A different epoch.
-    assert_eq!(s.verify(slot, 6).unwrap_err(), EntryError::BadSignature);
+    assert_eq!(
+        s.verify(&[9; 32], &Clock::new(), slot, 6).unwrap_err(),
+        EntryError::BadSignature
+    );
 
     // A forged sender: claiming someone else's key does not produce their
     // signature.
     let mut forged = s.clone();
     forged.sender = *signer(12).verifying_key().as_bytes();
     assert_eq!(
-        forged.verify(slot, 5).unwrap_err(),
+        forged.verify(&[9; 32], &Clock::new(), slot, 5).unwrap_err(),
         EntryError::BadSignature
     );
 
@@ -299,14 +309,62 @@ fn authorship_is_verified_not_assumed() {
     let mut edited = s.clone();
     edited.body = b"forged".to_vec();
     assert_eq!(
-        edited.verify(slot, 5).unwrap_err(),
+        edited.verify(&[9; 32], &Clock::new(), slot, 5).unwrap_err(),
         EntryError::BadSignature
     );
 
     // A truncated signature is a verification failure, not a panic.
     let mut short = s.clone();
     short.sig.truncate(10);
-    assert_eq!(short.verify(slot, 5).unwrap_err(), EntryError::BadSignature);
+    assert_eq!(
+        short.verify(&[9; 32], &Clock::new(), slot, 5).unwrap_err(),
+        EntryError::BadSignature
+    );
 
     let _ = Mnemonic::from_entropy(&[0; 32]);
+}
+
+#[test]
+fn large_interleaved_history_and_extreme_clock_values_are_bounded() {
+    // Lightweight adverts exercise sorting without making signature generation
+    // dominate this regression. A chain alternates across 32 lanes.
+    let mut entries = Vec::new();
+    for i in 0..16_384u64 {
+        let l = lane((i % 32) as u8);
+        let mut clock = Clock::new();
+        if i > 0 {
+            clock.observe(lane(((i - 1) % 32) as u8), (i - 1) / 32);
+        }
+        clock.observe(lane(200), u64::MAX); // nonexistent lane is never an allocation size
+        entries.push(Entry::new(
+            Slot::new(l, i / 32),
+            1,
+            clock,
+            Payload::LaneAdvert,
+        ));
+    }
+    let expected: Vec<_> = entries.iter().map(Entry::slot).collect();
+    entries.reverse();
+    assert_eq!(
+        total_order(entries)
+            .iter()
+            .map(Entry::slot)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn longer_cycles_have_deterministic_fallback() {
+    let (a, b, c) = (lane(1), lane(2), lane(3));
+    let entries = vec![
+        entry(a, 0, 1, &[(c, 0)], "a"),
+        entry(b, 0, 1, &[(a, 0)], "b"),
+        entry(c, 0, 1, &[(b, 0)], "c"),
+    ];
+    let expected = bodies(&total_order(entries.clone()));
+    let mut reversed = entries;
+    reversed.reverse();
+    assert_eq!(bodies(&total_order(reversed)), expected);
+    assert_eq!(expected, ["a", "b", "c"]);
 }

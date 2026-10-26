@@ -17,4 +17,20 @@ name = "request"
 fields = ["addr", "request_index", "request_bytes", "mtime"]
 [[table]]
 name = "refund_spent"
-fields = ["spent_refund_voucher"]
+fields = ["spent_refund_voucher", "refund_account"]
+
+[[table]]
+name = "inbox_gate"
+fields = ["inbox_permits"]
+
+[[table]]
+name = "withdrawal"
+fields = ["withdrawal_response"]
+
+[[table]]
+name = "auth_spent"
+fields = ["auth_nonce"]
+
+[[table]]
+name = "auth_window"
+fields = ["minute", "count"]

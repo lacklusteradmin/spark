@@ -60,6 +60,7 @@ fn deployment() -> Deployment {
         Db::new(),
         keyring.accepted_keys(),
     ));
+    keyring.set_refund_keys(content.refund_keys());
     let issuer = Arc::new(spark_issuer::Issuer::new(
         Db::new(),
         IssuerKey::generate(&mut Fixed(2)).unwrap(),
@@ -327,6 +328,7 @@ fn a_wrong_key_is_refused_over_the_wire_too() {
 
     use spark_client::KeyringService;
     let forged = spark_client::Auth {
+        signer: Some(&bob),
         addr,
         key: *bob.public().sign.as_bytes(),
         sig: *bob.sign(&s.challenge(&addr)).as_bytes(),

@@ -36,6 +36,8 @@ fn service_seeded(seed: u64) -> issuer::Issuer {
         Db::new(),
         spark_crypto::IssuerKey::generate(&mut Fixed(seed)).expect("keygen"),
     )
+    .with_payment_verifier(std::sync::Arc::new(common::TestPayments))
+    .with_day_clock(std::sync::Arc::new(|| TODAY))
 }
 
 fn service() -> issuer::Issuer {
@@ -53,7 +55,21 @@ fn buy(
         serial: [serial; 32],
         grant,
     };
-    let pk = is.signing_public();
+    if is.signing_public_for(claim.price()).is_none() {
+        is.provision_price(
+            claim.price(),
+            spark_crypto::IssuerKey::generate(&mut Fixed(
+                u64::from_le_bytes(
+                    spark_crypto::sha256(&is.signing_public().to_der().unwrap())[..8]
+                        .try_into()
+                        .unwrap(),
+                )
+                .wrapping_add(claim.price()),
+            ))
+            .unwrap(),
+        );
+    }
+    let pk = is.signing_public_for(claim.price()).unwrap();
     let (blinded, b) = pk
         .blind(&mut Fixed(serial as u64 + 1), &claim.encode())
         .expect("blind");
@@ -91,7 +107,21 @@ fn the_issuer_never_sees_the_serial_it_signs() {
         serial: [0xab; 32],
         grant: Grant::Storage { size_class: 26 },
     };
-    let pk = is.signing_public();
+    if is.signing_public_for(claim.price()).is_none() {
+        is.provision_price(
+            claim.price(),
+            spark_crypto::IssuerKey::generate(&mut Fixed(
+                u64::from_le_bytes(
+                    spark_crypto::sha256(&is.signing_public().to_der().unwrap())[..8]
+                        .try_into()
+                        .unwrap(),
+                )
+                .wrapping_add(claim.price()),
+            ))
+            .unwrap(),
+        );
+    }
+    let pk = is.signing_public_for(claim.price()).unwrap();
     let (blinded, _) = pk.blind(&mut Fixed(3), &claim.encode()).unwrap();
 
     assert!(
@@ -119,24 +149,18 @@ fn no_stored_row_joins_a_payment_to_a_voucher() {
         "the payment was not recorded as spent"
     );
 
-    // The precise claim: the payment table holds the payment reference and
-    // nothing else. Checking only "the serial is absent" would be weaker than it
-    // looks — the serial is absent from a blinded message by construction, so a
-    // row that also stored the blinded message would pass while holding data it
-    // has no business keeping.
-    //
-    // (Storing the blinded message would not actually be a *cryptographic* link:
-    // RSA blind signatures are unconditionally unlinkable, so the issuer could not
-    // match its own outputs to redemptions better than chance. It would still be
-    // data kept for no reason, and the day the blinding is weakened it becomes the
-    // link. `gate5_servers.rs` catches it from the other direction, by comparing
-    // what the code writes against the declared schema.)
+    // Only settled reference and exact-retry metadata are retained. Neither the
+    // hidden serial nor the redeemed name is available at issuance.
     for row in is.db().rows(issuer::T_PAYMENT) {
-        let fields: Vec<&str> = row.iter().map(|(n, _)| *n).collect();
+        let fields: Vec<&str> = row.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             fields,
-            ["spent_payment_ref"],
-            "the payment table grew a field"
+            [
+                "spent_payment_ref",
+                "payment_request_hash",
+                "payment_response"
+            ],
+            "payment retry metadata changed"
         );
         assert!(
             !contains(&issuer_bytes(&is), &claim.serial),
@@ -336,6 +360,7 @@ fn a_transfer_leaves_no_record_joining_old_key_to_new() {
     ));
 
     let mut msg = issuer::TRANSFER_CONTEXT.to_vec();
+    msg.extend_from_slice(&is.transfer_challenge("harbour").unwrap());
     msg.extend_from_slice(b"harbour");
     msg.extend_from_slice(&pub64(&buyer));
     assert_eq!(
@@ -386,6 +411,7 @@ fn only_the_holder_can_transfer() {
     });
 
     let mut msg = issuer::TRANSFER_CONTEXT.to_vec();
+    msg.extend_from_slice(&is.transfer_challenge("quay").unwrap());
     msg.extend_from_slice(b"quay");
     msg.extend_from_slice(&pub64(&target));
     assert_eq!(
@@ -423,7 +449,7 @@ fn an_expired_name_does_not_reduce_quota() {
     };
 
     // Draw a token, which is what quota is for.
-    let pk = ks.issuer_public();
+    let pk = ks.issuer_public_for(12).unwrap();
     let (blinded, _) = spark_tokens::begin(&pk, &mut Fixed(5), &[[1; 32]], 12).unwrap();
     assert!(matches!(
         ks.handle(keyring::Request::WithdrawTokens {
@@ -458,7 +484,9 @@ fn an_expired_name_does_not_reduce_quota() {
     });
     let expired = TODAY + 30 + issuer::GRACE_DAYS + 1;
     assert_eq!(
-        is.handle(issuer::Request::Resolve("lapsing".into(), expired)),
+        is.clone()
+            .with_day_clock(std::sync::Arc::new(move || expired))
+            .handle(issuer::Request::Resolve("lapsing".into(), 0)),
         issuer::Response::Resolved(None),
         "a lapsed name still resolves"
     );
@@ -504,7 +532,9 @@ fn a_name_resolves_through_its_grace_period_then_returns_to_sale() {
     for day in [TODAY, paid_until, paid_until + issuer::GRACE_DAYS] {
         assert!(
             matches!(
-                is.handle(issuer::Request::Resolve("seasonal".into(), day)),
+                is.clone()
+                    .with_day_clock(std::sync::Arc::new(move || day))
+                    .handle(issuer::Request::Resolve("seasonal".into(), 0)),
                 issuer::Response::Resolved(Some(_))
             ),
             "the name stopped resolving on day {day}, inside its grace period"
@@ -514,7 +544,9 @@ fn a_name_resolves_through_its_grace_period_then_returns_to_sale() {
     // One day past grace it is gone, and someone else may buy it.
     let gone = paid_until + issuer::GRACE_DAYS + 1;
     assert_eq!(
-        is.handle(issuer::Request::Resolve("seasonal".into(), gone)),
+        is.clone()
+            .with_day_clock(std::sync::Arc::new(move || gone))
+            .handle(issuer::Request::Resolve("seasonal".into(), 0)),
         issuer::Response::Resolved(None)
     );
 
@@ -529,18 +561,22 @@ fn a_name_resolves_through_its_grace_period_then_returns_to_sale() {
     )
     .unwrap();
     assert_eq!(
-        is.handle(issuer::Request::Register {
-            name: "seasonal".into(),
-            key: pub64(&second),
-            claim: c2,
-            voucher: v2,
-            today: gone,
-        }),
+        is.clone()
+            .with_day_clock(std::sync::Arc::new(move || gone))
+            .handle(issuer::Request::Register {
+                name: "seasonal".into(),
+                key: pub64(&second),
+                claim: c2,
+                voucher: v2,
+                today: gone,
+            }),
         issuer::Response::Registered,
         "a reclaimed name did not return to sale"
     );
     assert_eq!(
-        is.handle(issuer::Request::Resolve("seasonal".into(), gone)),
+        is.clone()
+            .with_day_clock(std::sync::Arc::new(move || gone))
+            .handle(issuer::Request::Resolve("seasonal".into(), 0)),
         issuer::Response::Resolved(Some(pub64(&second)))
     );
 }
@@ -604,12 +640,14 @@ fn renewing_early_extends_rather_than_shortens() {
     )
     .unwrap();
     assert_eq!(
-        is.handle(issuer::Request::Renew {
-            name: "steady".into(),
-            claim: c3,
-            voucher: v3,
-            today: until + issuer::GRACE_DAYS + 1,
-        }),
+        is.clone()
+            .with_day_clock(std::sync::Arc::new(move || until + issuer::GRACE_DAYS + 1))
+            .handle(issuer::Request::Renew {
+                name: "steady".into(),
+                claim: c3,
+                voucher: v3,
+                today: until + issuer::GRACE_DAYS + 1,
+            }),
         issuer::Response::Refused(issuer::Refusal::Unknown)
     );
 }
@@ -650,4 +688,235 @@ fn the_price_table_charges_premium_names_more() {
     assert_eq!(year.price(), basic.price() * 12);
 
     let _ = token_issuer();
+}
+
+#[test]
+fn unverified_payment_fails_closed_without_consuming_reference() {
+    let is = issuer::Issuer::new(
+        Db::new(),
+        spark_crypto::IssuerKey::generate(&mut Fixed(77)).unwrap(),
+    );
+    assert_eq!(
+        is.handle(issuer::Request::Purchase {
+            blinded: vec![1; 256],
+            payment: b"made-up-tx".to_vec(),
+            amount: 1
+        }),
+        issuer::Response::Refused(issuer::Refusal::Underpaid)
+    );
+    assert!(is.db().rows(issuer::T_PAYMENT).is_empty());
+}
+
+#[test]
+fn cheap_blind_signing_key_cannot_authorize_expensive_hidden_grant() {
+    let is = service();
+    // Payment is settled for one unit, but the blinded message claims 255 premium months.
+    let claim = VoucherClaim {
+        serial: [192; 32],
+        grant: Grant::NameMonths {
+            months: 255,
+            premium: true,
+        },
+    };
+    let pk = is.signing_public_for(1).unwrap();
+    let (blinded, b) = pk.blind(&mut Fixed(999), &claim.encode()).unwrap();
+    let issuer::Response::Signed(sig) = is.handle(issuer::Request::Purchase {
+        blinded,
+        payment: b"paid-one-unit".to_vec(),
+        amount: 1,
+    }) else {
+        panic!()
+    };
+    let voucher = pk.finalize(b, &sig, &claim.encode()).unwrap();
+    assert_eq!(
+        is.handle(issuer::Request::Register {
+            name: "ab".into(),
+            key: pub64(&ident(1)),
+            claim,
+            voucher,
+            today: TODAY
+        }),
+        issuer::Response::Refused(issuer::Refusal::BadVoucher)
+    );
+}
+
+#[test]
+fn caller_future_date_cannot_steal_live_name() {
+    let is = service();
+    let grant = Grant::NameMonths {
+        months: 1,
+        premium: false,
+    };
+    let (claim, voucher) = buy(&is, 180, grant, b"owner-payment").unwrap();
+    assert_eq!(
+        is.handle(issuer::Request::Register {
+            name: "protected".into(),
+            key: pub64(&ident(1)),
+            claim,
+            voucher,
+            today: TODAY
+        }),
+        issuer::Response::Registered
+    );
+    let (claim, voucher) = buy(&is, 181, grant, b"attacker-payment").unwrap();
+    assert_eq!(
+        is.handle(issuer::Request::Register {
+            name: "protected".into(),
+            key: pub64(&ident(2)),
+            claim,
+            voucher,
+            today: u32::MAX
+        }),
+        issuer::Response::Refused(issuer::Refusal::Taken)
+    );
+    assert_eq!(
+        is.handle(issuer::Request::Resolve("protected".into(), u32::MAX)),
+        issuer::Response::Resolved(Some(pub64(&ident(1))))
+    );
+}
+
+#[test]
+fn old_transfer_cannot_replay_after_ownership_returns() {
+    let is = service();
+    let a = ident(1);
+    let b = ident(2);
+    let (claim, voucher) = buy(
+        &is,
+        182,
+        Grant::NameMonths {
+            months: 1,
+            premium: false,
+        },
+        b"transfer-payment",
+    )
+    .unwrap();
+    assert_eq!(
+        is.handle(issuer::Request::Register {
+            name: "replay-proof".into(),
+            key: pub64(&a),
+            claim,
+            voucher,
+            today: TODAY
+        }),
+        issuer::Response::Registered
+    );
+    let transfer = |from: &Identity, to: &Identity| {
+        let mut msg = issuer::TRANSFER_CONTEXT.to_vec();
+        msg.extend_from_slice(&is.transfer_challenge("replay-proof").unwrap());
+        msg.extend_from_slice(b"replay-proof");
+        msg.extend_from_slice(&pub64(to));
+        issuer::Request::Transfer {
+            name: "replay-proof".into(),
+            new_key: pub64(to),
+            sig: *from.sign(&msg).as_bytes(),
+        }
+    };
+    let old = transfer(&a, &b);
+    assert_eq!(is.handle(old.clone()), issuer::Response::Transferred);
+    assert_eq!(is.handle(transfer(&b, &a)), issuer::Response::Transferred);
+    assert_eq!(
+        is.handle(old),
+        issuer::Response::Refused(issuer::Refusal::BadSignature)
+    );
+}
+
+#[test]
+fn invalid_storage_price_classes_do_not_overflow() {
+    for size_class in 0..=u8::MAX {
+        let price = VoucherClaim {
+            serial: [0; 32],
+            grant: Grant::Storage { size_class },
+        }
+        .price();
+        assert_eq!(price > 0, (20..=40).contains(&size_class));
+    }
+}
+
+#[test]
+fn exact_purchase_retry_returns_the_original_blind_signature() {
+    let is = service();
+    let grant = Grant::NameMonths {
+        months: 1,
+        premium: false,
+    };
+    let (_, first) = buy(&is, 190, grant, b"lost-purchase-response").unwrap();
+    let (_, retry) = buy(&is, 190, grant, b"lost-purchase-response").unwrap();
+    assert_eq!(first, retry);
+    assert_eq!(
+        is.db()
+            .field(issuer::T_ISSUANCE, "total", "blind_sig_count")
+            .and_then(|c| c.num()),
+        Some(1)
+    );
+}
+
+#[test]
+fn concurrent_registrations_have_exactly_one_winner() {
+    let is = service();
+    let grant = Grant::NameMonths {
+        months: 1,
+        premium: false,
+    };
+    let (c1, v1) = buy(&is, 193, grant, b"race-one").unwrap();
+    let (c2, v2) = buy(&is, 194, grant, b"race-two").unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let threads: Vec<_> = [(c1, v1, pub64(&ident(1))), (c2, v2, pub64(&ident(2)))]
+        .into_iter()
+        .map(|(claim, voucher, key)| {
+            let is = is.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                is.handle(issuer::Request::Register {
+                    name: "race".into(),
+                    key,
+                    claim,
+                    voucher,
+                    today: TODAY,
+                })
+            })
+        })
+        .collect();
+    let responses: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|r| **r == issuer::Response::Registered)
+            .count(),
+        1
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|r| **r == issuer::Response::Refused(issuer::Refusal::Taken))
+            .count(),
+        1
+    );
+    assert_eq!(is.db().rows(issuer::T_VOUCHER).len(), 1);
+}
+
+#[test]
+fn date_overflow_does_not_spend_a_valid_voucher() {
+    let is = service().with_day_clock(std::sync::Arc::new(|| u32::MAX));
+    let (claim, voucher) = buy(
+        &is,
+        195,
+        Grant::NameMonths {
+            months: 1,
+            premium: false,
+        },
+        b"overflow",
+    )
+    .unwrap();
+    assert_eq!(
+        is.handle(issuer::Request::Register {
+            name: "overflow".into(),
+            key: pub64(&ident(1)),
+            claim,
+            voucher,
+            today: 0
+        }),
+        issuer::Response::Refused(issuer::Refusal::WrongGrant)
+    );
+    assert!(is.db().rows(issuer::T_VOUCHER).is_empty());
 }

@@ -23,7 +23,7 @@ pub const ENTRY_VERSION: u8 = 1;
 /// which is what `Spark-spec.md` F4 already implies when it says an existing
 /// member "re-shares the historical keys". Under decision D-A there is no
 /// separate MLS delivery path to lose: members read chunks. MLS carries
-/// membership, the owner set, and the key agreement that distributes `room_root`.
+/// membership and the owner set; its exporter derives each generation root.
 ///
 /// Confidentiality at rest comes from the chunk AEAD. Authorship comes from the
 /// signature below, made with the identity key that is also the MLS credential —
@@ -61,8 +61,19 @@ pub struct Signed {
 }
 
 /// The bytes an authorship signature covers.
-fn signed_over(lane: &[u8; 16], seq: u64, epoch: u64, body: &[u8]) -> Vec<u8> {
+fn signed_over(
+    context: &[u8; 32],
+    clock: &Clock,
+    lane: &[u8; 16],
+    seq: u64,
+    epoch: u64,
+    body: &[u8],
+) -> Vec<u8> {
     let mut v = MSG_CONTEXT.to_vec();
+    v.extend_from_slice(context);
+    let clock = postcard::to_allocvec(clock).expect("canonical clock");
+    v.extend_from_slice(&(clock.len() as u64).to_be_bytes());
+    v.extend_from_slice(&clock);
     v.extend_from_slice(lane);
     v.extend_from_slice(&seq.to_be_bytes());
     v.extend_from_slice(&epoch.to_be_bytes());
@@ -73,13 +84,15 @@ fn signed_over(lane: &[u8; 16], seq: u64, epoch: u64, body: &[u8]) -> Vec<u8> {
 impl Signed {
     /// Sign a message for a slot.
     pub fn new(
+        context: &[u8; 32],
+        clock: &Clock,
         slot: Slot,
         epoch: u64,
         body: Vec<u8>,
         sender: &VerifyingKey,
         sign: impl FnOnce(&[u8]) -> Signature,
     ) -> Self {
-        let msg = signed_over(slot.lane.as_bytes(), slot.seq, epoch, &body);
+        let msg = signed_over(context, clock, slot.lane.as_bytes(), slot.seq, epoch, &body);
         Self {
             body,
             sender: *sender.as_bytes(),
@@ -88,14 +101,30 @@ impl Signed {
     }
 
     /// Verify authorship against the slot it was found in.
-    pub fn verify(&self, slot: Slot, epoch: u64) -> Result<VerifyingKey, EntryError> {
+    pub fn verify(
+        &self,
+        context: &[u8; 32],
+        clock: &Clock,
+        slot: Slot,
+        epoch: u64,
+    ) -> Result<VerifyingKey, EntryError> {
         let sig: [u8; 64] = self
             .sig
             .as_slice()
             .try_into()
             .map_err(|_| EntryError::BadSignature)?;
         let key = VerifyingKey::from_bytes(&self.sender).map_err(|_| EntryError::BadSignature)?;
-        let msg = signed_over(slot.lane.as_bytes(), slot.seq, epoch, &self.body);
+        if spark_chunk::LaneId::message(&key) != slot.lane {
+            return Err(EntryError::BadSignature);
+        }
+        let msg = signed_over(
+            context,
+            clock,
+            slot.lane.as_bytes(),
+            slot.seq,
+            epoch,
+            &self.body,
+        );
         key.verify(&msg, &Signature::from_bytes(sig))
             .map_err(|_| EntryError::BadSignature)?;
         Ok(key)

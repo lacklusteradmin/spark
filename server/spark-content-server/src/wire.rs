@@ -29,8 +29,19 @@ fn from_wire(r: w::Req) -> Request {
         },
         w::Req::Get { name } => Request::Get { name },
         w::Req::Head { name } => Request::Head { name },
-        w::Req::Release { name, receipt } => Request::Release { name, receipt },
-        w::Req::Delete { name } => Request::Delete { name },
+        w::Req::Release {
+            name,
+            receipt,
+            size_class,
+            blinded,
+        } => Request::Release {
+            name,
+            receipt,
+            size_class,
+            blinded,
+        },
+        w::Req::Delete { name, receipt } => Request::Delete { name, receipt },
+        w::Req::GetRefundKey(c) => Request::GetRefundKey(c),
     }
 }
 
@@ -41,6 +52,7 @@ impl From<Response> for w::Resp {
             Response::Chunk(b) => w::Resp::Chunk(b),
             Response::Exists(e) => w::Resp::Exists(e),
             Response::Released { freed, voucher } => w::Resp::Released { freed, voucher },
+            Response::RefundKey(k) => w::Resp::RefundKey(k),
             Response::Deleted => w::Resp::Deleted,
             Response::Refused(x) => w::Resp::Refused(match x {
                 Refusal::NameTaken => w::Refusal::NameTaken,

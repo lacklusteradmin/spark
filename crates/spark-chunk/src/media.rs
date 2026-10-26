@@ -47,13 +47,15 @@ pub fn seal_raw(plaintext: &[u8]) -> (ChunkName, Secret<32>, Chunk) {
     (name_of(&chunk), key, chunk)
 }
 
-/// The name a media chunk is stored under: the hash of the finished chunk.
+/// The media address: SHA-256 of the finished chunk with its high bit cleared.
 ///
 /// Hashing the *chunk* rather than the plaintext lets the content store verify a
 /// write matches its claimed name while holding no key at all. That closes name
 /// squatting: nobody can claim a name they cannot produce bytes for.
 pub fn name_of(chunk: &Chunk) -> ChunkName {
-    ChunkName::new(sha256(chunk.as_bytes()))
+    let mut name = sha256(chunk.as_bytes());
+    name[0] &= 0x7f;
+    ChunkName::new(name)
 }
 
 /// Open a media chunk with its key.

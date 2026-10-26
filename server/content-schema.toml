@@ -6,7 +6,7 @@ name = "chunk"
 fields = ["chunk_name", "chunk_bytes", "chunk_len", "chunk_kind", "receipt_count"]
 [[table]]
 name = "receipt"
-fields = ["chunk_name", "receipt_hash"]
+fields = ["chunk_name", "receipt_hash", "receipt_size_class", "refund_request_hash", "refund_response"]
 [[table]]
 name = "token_spent"
-fields = ["spent_token_serial"]
+fields = ["spent_token_serial", "upload_request_hash", "upload_receipt"]

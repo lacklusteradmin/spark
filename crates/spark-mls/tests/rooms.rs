@@ -373,3 +373,69 @@ fn the_root_rotates_on_every_membership_change() {
     assert_ne!(g1, g2, "adding a member did not start a new generation");
     assert!(a.generation() >= 2, "generation did not advance");
 }
+
+#[test]
+fn a_nonowner_cannot_bypass_policy_using_raw_openmls() {
+    use openmls::prelude::tls_codec::Serialize;
+    use openmls::prelude::*;
+    let (alice, bob) = (Client::new(71), Client::new(72));
+    let (mut a, b) = room_of_two(&alice, &bob);
+    let before = a.epoch();
+    let mut raw = MlsGroup::load(bob.provider.storage(), &GroupId::from_slice(&b.group_id()))
+        .unwrap()
+        .unwrap();
+    let (commit, _, _) = raw
+        .update_group_context_extensions(
+            &bob.provider,
+            OwnerSet::founder(&bob.key()).extensions(),
+            &bob.signer,
+        )
+        .unwrap();
+    assert_eq!(
+        a.process(&alice.provider, &commit.tls_serialize_detached().unwrap())
+            .unwrap_err(),
+        RoomError::NotAnOwner
+    );
+    assert_eq!(a.epoch(), before);
+    assert!(a.owners().unwrap().contains(&alice.key()));
+}
+
+#[test]
+fn a_valid_key_package_cannot_claim_another_identity() {
+    let (alice, bob) = (Client::new(73), Client::new(74));
+    let mut a = Room::create(&alice.provider, &alice.key(), &alice.signer).unwrap();
+    // MLS validates Bob's signature, but the BasicCredential falsely says Alice.
+    let package = key_package(&bob.provider, &alice.key(), &bob.signer).unwrap();
+    assert!(
+        a.add_member(&alice.provider, &alice.signer, package.key_package())
+            .is_err()
+    );
+    assert_eq!(a.members().len(), 1);
+}
+
+#[test]
+fn receiving_a_raw_nonowner_removal_does_not_apply_it() {
+    use openmls::prelude::tls_codec::Serialize;
+    use openmls::prelude::*;
+    let (alice, bob) = (Client::new(75), Client::new(76));
+    let (mut a, b) = room_of_two(&alice, &bob);
+    let mut raw = MlsGroup::load(bob.provider.storage(), &GroupId::from_slice(&b.group_id()))
+        .unwrap()
+        .unwrap();
+    let alice_leaf = raw
+        .members()
+        .find(|m| m.signature_key == alice.key().as_bytes())
+        .unwrap()
+        .index;
+    let (commit, _, _) = raw
+        .remove_members(&bob.provider, &bob.signer, &[alice_leaf])
+        .unwrap();
+    let before = a.epoch();
+    assert_eq!(
+        a.process(&alice.provider, &commit.tls_serialize_detached().unwrap())
+            .unwrap_err(),
+        RoomError::NotAnOwner
+    );
+    assert_eq!(a.epoch(), before);
+    assert_eq!(a.members().len(), 2);
+}

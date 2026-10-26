@@ -22,6 +22,50 @@ use spark_content_server::Content;
 use spark_issuer::Issuer;
 use spark_keyring_server::Keyring;
 
+// One absolute deadline for a complete handshake or application frame. A
+// socket timeout alone restarts on each byte and permits indefinite slow drips.
+#[derive(Clone)]
+struct Deadline(Arc<std::sync::Mutex<std::time::Instant>>);
+impl Deadline {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(15),
+        )))
+    }
+    fn restart(&self) {
+        *self.0.lock().unwrap() = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    }
+    fn remaining(&self) -> std::io::Result<std::time::Duration> {
+        self.0
+            .lock()
+            .unwrap()
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "frame deadline"))
+    }
+}
+struct DeadlineSocket {
+    stream: std::net::TcpStream,
+    deadline: Deadline,
+}
+impl std::io::Read for DeadlineSocket {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.stream
+            .set_read_timeout(Some(self.deadline.remaining()?))?;
+        std::io::Read::read(&mut self.stream, bytes)
+    }
+}
+impl std::io::Write for DeadlineSocket {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream
+            .set_write_timeout(Some(self.deadline.remaining()?))?;
+        std::io::Write::write(&mut self.stream, bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.stream)
+    }
+}
+
 /// A listening service.
 pub struct Listener {
     /// Where it is listening.
@@ -46,25 +90,54 @@ where
     let listener = TcpListener::bind(bind)?;
     let addr = listener.local_addr()?;
     let f = Arc::new(f);
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handle = std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { break };
+            use std::sync::atomic::Ordering;
+            if active
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    (n < 128).then_some(n + 1)
+                })
+                .is_err()
+            {
+                continue;
+            }
+            struct Permit(Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for Permit {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let permit = Permit(active.clone());
+            let timeout = Some(std::time::Duration::from_secs(15));
+            if stream.set_read_timeout(timeout).is_err()
+                || stream.set_write_timeout(timeout).is_err()
+            {
+                continue;
+            }
             let (f, tls) = (f.clone(), tls.clone());
             // One thread per connection. A connection that misbehaves — including
             // one that fails the TLS handshake — takes down its own thread and
             // nothing else.
             std::thread::spawn(move || {
+                let _permit = permit;
                 let Ok(conn) = rustls::ServerConnection::new(tls) else {
                     return;
                 };
-                let _ = session(rustls::StreamOwned::new(conn, stream), f.as_ref());
+                let deadline = Deadline::new();
+                let stream = DeadlineSocket {
+                    stream,
+                    deadline: deadline.clone(),
+                };
+                let _ = session(rustls::StreamOwned::new(conn, stream), f.as_ref(), deadline);
             });
         }
     });
     Ok(Listener { addr, handle })
 }
 
-fn session<S, Q, R, F>(stream: S, f: &F) -> Result<(), ChannelError>
+fn session<S, Q, R, F>(stream: S, f: &F, deadline: Deadline) -> Result<(), ChannelError>
 where
     S: std::io::Read + std::io::Write,
     Q: serde::de::DeserializeOwned + spark_wire::Operation,
@@ -77,14 +150,15 @@ where
     // frame is exactly FRAME_BYTES long and a protocol frame almost never is.
     // Deciding per connection rather than per message means a peer cannot switch
     // halfway and get a variable-length answer out of a paced session.
+    deadline.restart();
     let first = match ch.recv_raw() {
         Ok(b) => b,
         Err(ChannelError::Closed) => return Ok(()),
         Err(e) => return Err(e),
     };
     match CoverFrame::from_bytes(&first) {
-        Some(cover) => paced_session(ch, cover, f),
-        None => plain_session(ch, Frame::from_bytes(&first)?, f),
+        Some(cover) => paced_session(ch, cover, f, deadline),
+        None => plain_session(ch, Frame::from_bytes(&first)?, f, deadline),
     }
 }
 
@@ -98,6 +172,7 @@ fn paced_session<S, Q, R, F>(
     mut ch: Channel<S>,
     first: CoverFrame,
     f: &F,
+    deadline: Deadline,
 ) -> Result<(), ChannelError>
 where
     S: std::io::Read + std::io::Write,
@@ -123,8 +198,10 @@ where
         // One frame back per frame received, carrying whatever is queued — a reply,
         // part of one, or nothing. Answering a dummy with silence would make dummies
         // recognisable, which is the whole thing being defended against.
+        deadline.restart();
         ch.send_raw(outbound.tick().as_bytes())?;
 
+        deadline.restart();
         cover = match ch.recv_raw() {
             Ok(b) => CoverFrame::from_bytes(&b)
                 .ok_or(ChannelError::Wire(spark_wire::WireError::Malformed))?,
@@ -135,7 +212,12 @@ where
 }
 
 /// A session without cover traffic: one protocol frame in, one out.
-fn plain_session<S, Q, R, F>(mut ch: Channel<S>, first: Frame, f: &F) -> Result<(), ChannelError>
+fn plain_session<S, Q, R, F>(
+    mut ch: Channel<S>,
+    first: Frame,
+    f: &F,
+    deadline: Deadline,
+) -> Result<(), ChannelError>
 where
     S: std::io::Read + std::io::Write,
     Q: serde::de::DeserializeOwned + spark_wire::Operation,
@@ -147,7 +229,10 @@ where
         // A frame that does not decode ends the session. Answering it would mean
         // telling a peer which malformed inputs get further than others.
         let req: Q = frame.body()?;
-        ch.reply(frame.req_id, &f(req))?;
+        let response = f(req);
+        deadline.restart();
+        ch.reply(frame.req_id, &response)?;
+        deadline.restart();
         frame = match ch.recv() {
             Ok(f) => f,
             // A closed connection is how a session ends, not an error to report.
@@ -182,4 +267,41 @@ pub fn issuer_service(
     svc: Arc<Issuer>,
 ) -> std::io::Result<Listener> {
     serve(bind, tls, move |r: issuer::Req| svc.handle_wire(r))
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn partial_reads_cannot_extend_the_absolute_deadline() {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut writer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let deadline = Deadline::new();
+        *deadline.0.lock().unwrap() =
+            std::time::Instant::now() + std::time::Duration::from_millis(50);
+        let mut socket = DeadlineSocket { stream, deadline };
+        let drip = std::thread::spawn(move || {
+            for _ in 0..20 {
+                if writer.write_all(&[1]).is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        let mut got = 0;
+        while socket.read_exact(&mut [0]).is_ok() {
+            got += 1;
+        }
+        assert!(got < 20, "every small read reset the deadline");
+        drop(socket);
+        drip.join().unwrap();
+    }
+    #[test]
+    fn frame_budget_allows_the_default_minute_cover_interval() {
+        let deadline = Deadline::new();
+        deadline.restart();
+        assert!(deadline.remaining().unwrap() > std::time::Duration::from_secs(60));
+    }
 }

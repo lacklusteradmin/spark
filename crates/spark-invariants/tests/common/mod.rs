@@ -36,11 +36,15 @@ pub fn issuer() -> &'static spark_crypto::IssuerKey {
     K.get_or_init(|| spark_crypto::IssuerKey::generate(&mut Fixed(42)).expect("keygen"))
 }
 
-/// Draw one real token for `bytes`, through the full blind dance.
+/// Draw a 1 MiB fixture token, the denomination provisioned for this test issuer.
 pub fn token(serial: u8, bytes: u64) -> (spark_crypto::TokenClaim, spark_crypto::Token) {
+    assert!(
+        bytes <= 1 << 20,
+        "fixture exceeds the provisioned denomination"
+    );
     let claim = spark_crypto::TokenClaim {
         serial: [serial; 32],
-        size_class: spark_tokens::class_for(bytes),
+        size_class: 20,
     };
     let pk = issuer().public();
     let (bm, b) = pk
@@ -53,12 +57,22 @@ pub fn token(serial: u8, bytes: u64) -> (spark_crypto::TokenClaim, spark_crypto:
     )
 }
 
+/// Test-only settlement stub; production uses a rejecting adapter by default.
+pub struct TestPayments;
+impl spark_issuer::PaymentVerifier for TestPayments {
+    fn verify(&self, payment: &[u8], amount: u64, _: &[u8]) -> bool {
+        !payment.is_empty() && amount > 0
+    }
+}
+
 /// An issuer service with its own voucher-signing key.
 pub fn name_issuer() -> spark_issuer::Issuer {
     spark_issuer::Issuer::new(
         spark_store::Db::new(),
         spark_crypto::IssuerKey::generate(&mut Fixed(77)).expect("keygen"),
     )
+    .with_payment_verifier(std::sync::Arc::new(TestPayments))
+    .with_day_clock(std::sync::Arc::new(|| 20_000))
 }
 
 /// Buy a voucher through the real blind dance.
@@ -72,7 +86,21 @@ pub fn buy_voucher(
         serial: [serial; 32],
         grant,
     };
-    let pk = is.signing_public();
+    if is.signing_public_for(claim.price()).is_none() {
+        is.provision_price(
+            claim.price(),
+            spark_crypto::IssuerKey::generate(&mut Fixed(
+                u64::from_le_bytes(
+                    spark_crypto::sha256(&is.signing_public().to_der().unwrap())[..8]
+                        .try_into()
+                        .unwrap(),
+                )
+                .wrapping_add(claim.price()),
+            ))
+            .unwrap(),
+        );
+    }
+    let pk = is.signing_public_for(claim.price()).unwrap();
     let (blinded, b) = pk
         .blind(&mut Fixed(serial as u64 + 1), &claim.encode())
         .expect("blind");
@@ -87,4 +115,39 @@ pub fn buy_voucher(
         claim,
         pk.finalize(b, &sig, &claim.encode()).expect("finalize"),
     )
+}
+
+/// Exercise the complete anonymous refund dance, including client-side unblinding.
+pub fn release(
+    cs: &spark_content_server::Content,
+    name: [u8; 32],
+    receipt: [u8; 32],
+    size_class: u8,
+) -> (
+    spark_content_server::Response,
+    spark_crypto::TokenClaim,
+    Option<spark_crypto::Token>,
+) {
+    use spark_content_server::{Request, Response};
+    let Response::RefundKey(der) = cs.handle(Request::GetRefundKey(size_class)) else {
+        panic!("refund key")
+    };
+    let pk = spark_crypto::IssuerPublic::from_der(&der).unwrap();
+    let claim = spark_crypto::TokenClaim {
+        serial: spark_crypto::sha256(&receipt),
+        size_class,
+    };
+    let msg = claim.refund_message();
+    let (blinded, b) = pk.blind(&mut Fixed(71), &msg).unwrap();
+    let response = cs.handle(Request::Release {
+        name,
+        receipt,
+        size_class,
+        blinded,
+    });
+    let token = match &response {
+        Response::Released { voucher, .. } => Some(pk.finalize(b, voucher, &msg).unwrap()),
+        _ => None,
+    };
+    (response, claim, token)
 }

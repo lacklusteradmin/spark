@@ -5,6 +5,8 @@ use spark_wire::*;
 
 fn auth() -> Auth {
     Auth {
+        challenge: [0; 32],
+        nonce: [1; 32],
         addr: [1; 32],
         key: [2; 32],
         sig: vec![3; 64],
@@ -25,22 +27,32 @@ fn every_request_round_trips() {
         keyring::Req::GetSnapshot(auth()),
         keyring::Req::GetDeltas(auth()),
         keyring::Req::PutDelta(auth(), vec![1, 2, 3]),
-        keyring::Req::PutSnapshot(auth(), vec![4, 5]),
+        keyring::Req::PutSnapshot(auth(), vec![4, 5], (None, 0), vec![]),
         keyring::Req::GetQuota(auth()),
         keyring::Req::WithdrawTokens {
             auth: auth(),
             blinded: vec![vec![1; 8]],
             size_class: 12,
         },
-        keyring::Req::CreditRefund(auth(), vec![6], 512),
+        keyring::Req::CreditRefund(
+            auth(),
+            spark_crypto::TokenClaim {
+                serial: [6; 32],
+                size_class: 20,
+            },
+            spark_crypto::Token {
+                sig: vec![1; 256],
+                randomizer: [2; 32],
+            },
+        ),
         keyring::Req::PutRequest {
             addr: [8; 32],
             blob: vec![9],
-            token: vec![10],
+            permit: vec![10],
         },
         keyring::Req::GetRequests(auth()),
         keyring::Req::DropRequest(auth(), 3),
-        keyring::Req::GetIssuerKey,
+        keyring::Req::GetIssuerKey(20),
     ];
     for r in reqs {
         let f = Frame::encode(17, &r).expect("encode");
@@ -66,10 +78,15 @@ fn the_content_protocol_round_trips() {
         content::Req::Get { name: [3; 32] },
         content::Req::Head { name: [4; 32] },
         content::Req::Release {
+            size_class: 20,
+            blinded: vec![1; 256],
             name: [5; 32],
             receipt: [6; 32],
         },
-        content::Req::Delete { name: [7; 32] },
+        content::Req::Delete {
+            name: [7; 32],
+            receipt: [8; 32],
+        },
     ];
     for r in reqs {
         let f = Frame::encode(1, &r).unwrap();
@@ -120,7 +137,7 @@ fn the_issuer_protocol_round_trips() {
             new_key: vec![4; 64],
             sig: vec![5; 64],
         },
-        issuer::Req::GetIssuerKey,
+        issuer::Req::GetIssuerKey(1),
     ];
     for r in reqs {
         let f = Frame::encode(1, &r).unwrap();
@@ -148,7 +165,7 @@ fn the_opcode_and_the_payload_never_disagree() {
         ),
         (
             11,
-            Frame::encode(0, &keyring::Req::GetIssuerKey)
+            Frame::encode(0, &keyring::Req::GetIssuerKey(20))
                 .unwrap()
                 .payload,
         ),
@@ -160,7 +177,7 @@ fn the_opcode_and_the_payload_never_disagree() {
         ),
         (
             5,
-            Frame::encode(0, &issuer::Req::GetIssuerKey)
+            Frame::encode(0, &issuer::Req::GetIssuerKey(1))
                 .unwrap()
                 .payload,
         ),
@@ -177,7 +194,7 @@ fn the_opcode_and_the_payload_never_disagree() {
 fn a_frame_whose_header_lies_about_its_body_is_rejected() {
     // The header is what a server dispatched on. If it says one thing and the
     // body is another, trusting the body would mean the dispatch was a lie.
-    let mut f = Frame::encode(1, &keyring::Req::GetIssuerKey).unwrap();
+    let mut f = Frame::encode(1, &keyring::Req::GetIssuerKey(20)).unwrap();
     f.op = 0; // claim it is a Challenge
     assert_eq!(
         f.body::<keyring::Req>().unwrap_err(),

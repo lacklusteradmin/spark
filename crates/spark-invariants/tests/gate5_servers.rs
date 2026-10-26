@@ -92,7 +92,7 @@ fn exercise() -> Run {
 
     for (i, m) in MESSAGES.iter().enumerate() {
         let slot = Slot::new(lane, i as u64);
-        let (name, chunk) = room::seal(&root, slot, m.as_bytes());
+        let (name, chunk) = room::seal(&root, slot, &[7; 24], m.as_bytes());
         let (claim, tok) = token(next_serial(), chunk.len() as u64);
         let r = cs.handle(content::Request::Put {
             name: *name.as_bytes(),
@@ -128,6 +128,7 @@ fn exercise() -> Run {
         k.apply(&Delta::UpsertRoom(Room {
             id: RoomId([7; 16]),
             generations: vec![spark_keyring::Generation {
+                members: vec![],
                 epoch: 0,
                 root: Secret::new([0x5a; 32]),
                 my_next: 0,
@@ -140,7 +141,9 @@ fn exercise() -> Run {
         assert_eq!(
             ks.handle(keyring::Request::PutSnapshot(
                 auth(id),
-                snap.as_bytes().to_vec()
+                snap.as_bytes().to_vec(),
+                (None, 0),
+                vec![]
             )),
             keyring::Response::SnapshotWritten
         );
@@ -156,7 +159,7 @@ fn exercise() -> Run {
         ));
         // A real withdrawal: the client blinds locally, the service signs bytes it
         // cannot read.
-        let pk = ks.issuer_public();
+        let pk = ks.issuer_public_for(12).unwrap();
         let (blinded, w) =
             spark_tokens::begin(&pk, &mut Fixed(9), &[[id.addr().as_bytes()[0]; 32]], 12).unwrap();
         let keyring::Response::Tokens(sigs) = ks.handle(keyring::Request::WithdrawTokens {
@@ -190,6 +193,7 @@ fn exercise() -> Run {
         issuer::Response::Registered
     );
     let mut msg = issuer::TRANSFER_CONTEXT.to_vec();
+    msg.extend_from_slice(&is.transfer_challenge(HANDLE).unwrap());
     msg.extend_from_slice(HANDLE.as_bytes());
     msg.extend_from_slice(&pub64(&bob));
     assert_eq!(
@@ -202,14 +206,18 @@ fn exercise() -> Run {
     );
 
     // --- one holder releases the photo; the other still holds it ---
-    match cs.handle(content::Request::Release {
-        name: *photo_name.as_bytes(),
-        receipt: receipts[0],
-    }) {
-        content::Response::Released { freed, voucher } => {
+    ks.set_refund_keys(cs.refund_keys());
+    let (released, refund_claim, refund_token) =
+        common::release(&cs, *photo_name.as_bytes(), receipts[0], 20);
+    match released {
+        content::Response::Released { freed, voucher: _ } => {
             assert!(!freed, "bytes freed while another holder remains");
             assert_eq!(
-                ks.handle(keyring::Request::CreditRefund(auth(&alice), voucher, 512)),
+                ks.handle(keyring::Request::CreditRefund(
+                    auth(&alice),
+                    refund_claim,
+                    refund_token.unwrap()
+                )),
                 keyring::Response::Credited
             );
         }

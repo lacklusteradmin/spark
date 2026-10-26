@@ -16,7 +16,7 @@
 //! instead, breaking every tie by rule 3.
 
 use crate::entry::Entry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Sort entries into the order every client must compute identically.
 ///
@@ -46,47 +46,56 @@ pub fn total_order(mut entries: Vec<Entry>) -> Vec<Entry> {
     out
 }
 
-/// Does `u` happen before `v`?
-fn precedes(u: &Entry, v: &Entry) -> bool {
-    // Same lane: sequence is the order, always.
-    if u.lane == v.lane {
-        return u.seq < v.seq;
-    }
-    // Different lanes: `v` saw `u` if its clock records `u`'s lane at or past
-    // `u`'s sequence. If they saw each other, they are concurrent, and rule 3
-    // decides.
-    let v_saw_u = v.clock.has_seen(u.lane(), u.seq);
-    let u_saw_v = u.clock.has_seen(v.lane(), v.seq);
-    v_saw_u && !u_saw_v
-}
-
+// Same-lane chains imply all earlier entries; only the latest observed entry
+// in each other lane needs an edge. Work scales with the supplied clocks, not
+// the square of the entire recovered history.
 fn order_within_epoch(group: &[Entry]) -> Vec<Entry> {
     let n = group.len();
-    // `group` arrives pre-sorted by (lane, seq), so index order *is* rule 3.
+    if n < 2 || group.first().unwrap().lane == group.last().unwrap().lane {
+        return group.to_vec();
+    }
+    let mut lanes: BTreeMap<[u8; 16], Vec<usize>> = BTreeMap::new();
+    for (i, entry) in group.iter().enumerate() {
+        lanes.entry(entry.lane).or_default().push(i);
+    }
+    let mut outgoing = vec![Vec::new(); n];
     let mut indegree = vec![0usize; n];
-    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for u in 0..n {
-        for v in 0..n {
-            if u != v && precedes(&group[u], &group[v]) {
-                edges[u].push(v);
-                indegree[v] += 1;
-            }
+    for indices in lanes.values() {
+        for pair in indices.windows(2) {
+            outgoing[pair[0]].push(pair[1]);
+            indegree[pair[1]] += 1;
         }
     }
-
+    for (v, entry) in group.iter().enumerate() {
+        for lane in entry.clock.lanes() {
+            if lane.as_bytes() == &entry.lane {
+                continue;
+            }
+            let Some(indices) = lanes.get(lane.as_bytes()) else {
+                continue;
+            };
+            let seen = entry.clock.get(lane).unwrap();
+            let end = indices.partition_point(|&u| group[u].seq <= seen);
+            if end == 0 {
+                continue;
+            }
+            let u = indices[end - 1];
+            outgoing[u].push(v);
+            indegree[v] += 1;
+        }
+    }
+    let mut remaining: BTreeSet<usize> = (0..n).collect();
+    let mut ready: BTreeSet<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
     let mut out = Vec::with_capacity(n);
-    let mut taken = vec![false; n];
-    for _ in 0..n {
-        // The lowest-index ready node: rule 3 as the tie-break, deterministically.
-        let next = (0..n).find(|&k| !taken[k] && indegree[k] == 0).or_else(|| {
-            // No ready node and entries remain: the causal relation has a cycle.
-            // Fall back to rule 3 for the rest rather than looping forever.
-            (0..n).find(|&k| !taken[k])
-        });
-        let Some(k) = next else { break };
-        taken[k] = true;
-        for &v in &edges[k] {
-            indegree[v] = indegree[v].saturating_sub(1);
+    while let Some(&fallback) = remaining.first() {
+        // Malicious clocks can claim a cycle. Break it at a deterministic index.
+        let k = ready.pop_first().unwrap_or(fallback);
+        remaining.remove(&k);
+        for &v in &outgoing[k] {
+            indegree[v] -= 1;
+            if indegree[v] == 0 && remaining.contains(&v) {
+                ready.insert(v);
+            }
         }
         out.push(group[k].clone());
     }

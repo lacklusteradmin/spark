@@ -194,21 +194,42 @@ fn the_two_severe_threats_are_still_marked_severe() {
 }
 
 #[test]
-fn the_push_conflict_is_recorded_rather_than_left_to_be_discovered() {
+fn the_push_decision_is_recorded_rather_than_left_to_be_rediscovered() {
     // Stage 12's finding: build-notes §2 says servers may never store real-world
-    // identifiers, D3 says push is on by default, and delivering a push requires
-    // holding an Apple or Google token against an account. Both cannot hold as
-    // absolutes. The register is where that belongs, not an implementation
-    // someone starts before noticing.
+    // identifiers, D3 said push was on by default, and delivering a push requires
+    // holding an Apple or Google token against an account. It was resolved by a
+    // product decision: off by default, loud to turn on.
+    //
+    // The register has to keep saying both halves: what the conflict was, so
+    // nobody flips the default back without meeting it, and how it was resolved,
+    // so the resolution is not mistaken for engineering that removed the risk.
     let t = register().into_iter().find(|t| t.id == "W2").expect("W2");
     for phrase in [
         "real-world identifier",
-        "Both cannot hold",
+        "could not hold",
+        "off by default",
         "No delivery service exists yet",
     ] {
         assert!(
             t.residual.contains(phrase),
-            "W2 no longer records the push conflict (missing: {phrase:?})"
+            "W2 no longer records the push decision (missing: {phrase:?})"
         );
     }
+
+    // And the spec it cites has to agree. A register that says "off by default"
+    // over a D3 that still says "on" is the contradiction this test exists for.
+    let spec = std::fs::read_to_string(repo_root().join("Spark-spec.md")).expect("spec");
+    let d3 = spec
+        .split("### D3.")
+        .nth(1)
+        .and_then(|r| r.split("\n### ").next())
+        .expect("D3");
+    assert!(
+        d3.contains("off by default"),
+        "Spark-spec.md D3 does not say push is off by default"
+    );
+    assert!(
+        !d3.contains("Push is on by default"),
+        "Spark-spec.md D3 still says push is on by default"
+    );
 }

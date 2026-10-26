@@ -5,11 +5,8 @@
 //! authority would attest to is used, so paying one to attest to it would buy
 //! nothing.
 //!
-//! Generated fresh here, which is right for a verification harness and wrong for
-//! a deployment: a real one keeps its key across restarts, or every restart
-//! invalidates every pin in every client. That is the operational cost of pinning,
-//! and it is the reason the pin is of the public key rather than the certificate —
-//! the certificate can be reissued freely as long as the key stays.
+//! Verification harnesses generate ephemeral identities; `serve` persists its
+//! certificate and key together in its private SQLite vault. Pins survive restart.
 
 use spark_transport::Pin;
 
@@ -38,4 +35,26 @@ pub fn generate(name: &str) -> Result<Identity, String> {
         key: key.serialize_der(),
         pin,
     })
+}
+
+/// Reopen the same TLS identity after restart. The vault is operator-only.
+pub fn persistent(db: &spark_store::Db, name: &str) -> Result<Identity, String> {
+    let bytes = db.secret("tls-identity", || {
+        let id = generate(name).expect("TLS identity generation");
+        let mut bytes = (id.cert.len() as u32).to_be_bytes().to_vec();
+        bytes.extend(id.cert);
+        bytes.extend(id.key);
+        bytes
+    });
+    if bytes.len() < 4 {
+        return Err("corrupt TLS vault".into());
+    }
+    let n = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    let cert = bytes
+        .get(4..4usize.checked_add(n).ok_or("TLS length")?)
+        .ok_or("TLS certificate length")?
+        .to_vec();
+    let key = bytes[4 + n..].to_vec();
+    let pin = Pin::of(&cert).map_err(|e| e.to_string())?;
+    Ok(Identity { cert, key, pin })
 }

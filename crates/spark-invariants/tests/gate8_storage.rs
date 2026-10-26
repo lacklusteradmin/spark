@@ -47,8 +47,8 @@ fn upload(
     name: &spark_chunk::ChunkName,
     chunk: &Chunk,
 ) -> content::Response {
-    let pk = ks.issuer_public();
     let class = spark_tokens::class_for(chunk.len() as u64);
+    let pk = ks.issuer_public_for(class).unwrap();
     let (blinded, w) =
         spark_tokens::begin(&pk, &mut Fixed(serial as u64 + 3), &[[serial; 32]], class)
             .expect("blind");
@@ -92,7 +92,7 @@ fn two_accounts_uploading_one_file_produce_one_chunk_and_two_full_charges() {
         Secret::new([1; 32]),
         spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
     );
-    let cs = content::Content::new(Db::new(), issuer().public());
+    let cs = content::Content::with_keys(Db::new(), ks.accepted_keys());
     let (alice, bob, viewer) = (ident(1), ident(2), ident(3));
 
     // Two phones, the same picture, different EXIF. Scrubbing before hashing is
@@ -166,10 +166,14 @@ fn a_ten_member_room_stores_one_history() {
     // One member writes twenty messages. The other nine read them; nothing about
     // the room's size appears in what is stored.
     for seq in 0..20u64 {
-        let (name, chunk) =
-            room::seal(&root, Slot::new(lane, seq), format!("msg {seq}").as_bytes());
+        let (name, chunk) = room::seal(
+            &root,
+            Slot::new(lane, seq),
+            &[7; 24],
+            format!("msg {seq}").as_bytes(),
+        );
         let (c, t) = token(seq as u8, chunk.len() as u64);
-        cs.handle(content::Request::Put {
+        let _result = cs.handle(content::Request::Put {
             name: *name.as_bytes(),
             chunk: chunk.as_bytes().to_vec(),
             claim: c,
@@ -240,6 +244,8 @@ fn receipts_restore_from_seed() {
     ks.handle(keyring::Request::PutSnapshot(
         auth(&ks, &alice),
         snap.as_bytes().to_vec(),
+        (None, 0),
+        vec![],
     ));
 
     // ---- wipe. Only the mnemonic survives. ----
@@ -255,10 +261,14 @@ fn receipts_restore_from_seed() {
     let up = k2.uploads.first().expect("the upload list survived");
 
     // The restored receipt still releases the chunk, which is the whole point.
-    match cs.handle(content::Request::Release {
-        name: *spark_chunk::ChunkName::from(up.name).as_bytes(),
-        receipt: up.receipt.0,
-    }) {
+    match common::release(
+        &cs,
+        *spark_chunk::ChunkName::from(up.name).as_bytes(),
+        up.receipt.0,
+        c.size_class,
+    )
+    .0
+    {
         content::Response::Released { freed, .. } => {
             assert!(freed, "a restored receipt did not free")
         }
@@ -279,15 +289,18 @@ fn dissolve_deletes_room_chunks_and_spares_shared_media() {
 
     let mut room_names = Vec::new();
     for seq in 0..5u64 {
-        let (name, chunk) = room::seal(&root, Slot::new(lane, seq), b"history");
+        let (name, chunk) = room::seal(&root, Slot::new(lane, seq), &[7; 24], b"history");
         let (c, t) = token(seq as u8, chunk.len() as u64);
-        cs.handle(content::Request::Put {
+        let _result = cs.handle(content::Request::Put {
             name: *name.as_bytes(),
             chunk: chunk.as_bytes().to_vec(),
             claim: c,
             token: t,
         });
-        room_names.push(name);
+        let content::Response::Stored { receipt } = _result else {
+            panic!("upload")
+        };
+        room_names.push((name, receipt));
     }
 
     // A photo shared into the room, and also held by someone outside it.
@@ -305,15 +318,16 @@ fn dissolve_deletes_room_chunks_and_spares_shared_media() {
 
     // Dissolve: the owner derives every room chunk name from the generation roots
     // in their keyring and deletes them outright.
-    for n in &room_names {
+    for (n, receipt) in &room_names {
         assert_eq!(
             cs.handle(content::Request::Delete {
-                name: *n.as_bytes()
+                name: *n.as_bytes(),
+                receipt: *receipt
             }),
             content::Response::Deleted
         );
     }
-    for n in &room_names {
+    for (n, _receipt) in &room_names {
         assert_eq!(
             cs.handle(content::Request::Head {
                 name: *n.as_bytes()
@@ -333,9 +347,10 @@ fn dissolve_deletes_room_chunks_and_spares_shared_media() {
     );
     assert_eq!(
         cs.handle(content::Request::Delete {
-            name: *photo_name.as_bytes()
+            name: *photo_name.as_bytes(),
+            receipt: [0; 32]
         }),
-        content::Response::Refused(content::Refusal::NotDeletable)
+        content::Response::Refused(content::Refusal::BadReceipt)
     );
 }
 
@@ -348,7 +363,7 @@ fn the_content_store_logs_nothing_about_who() {
         Secret::new([1; 32]),
         spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
     );
-    let cs = content::Content::new(Db::new(), issuer().public());
+    let cs = content::Content::with_keys(Db::new(), ks.accepted_keys());
     let ids: Vec<Identity> = (1..=4).map(ident).collect();
 
     let file = scrub::scrub(&photo("p")).unwrap();
@@ -401,7 +416,7 @@ fn releasing_refunds_quota_without_relinking_the_upload() {
         Secret::new([1; 32]),
         spark_crypto::IssuerKey::generate(&mut Fixed(42)).unwrap(),
     );
-    let cs = content::Content::new(Db::new(), issuer().public());
+    let cs = content::Content::with_keys(Db::new(), ks.accepted_keys());
     let alice = ident(1);
 
     let file = scrub::scrub(&photo("q")).unwrap();
@@ -419,17 +434,20 @@ fn releasing_refunds_quota_without_relinking_the_upload() {
     };
     assert_eq!(used, size);
 
-    let content::Response::Released { voucher, .. } = cs.handle(content::Request::Release {
-        name: *name.as_bytes(),
+    ks.set_refund_keys(cs.refund_keys());
+    let (response, refund_claim, refund_token) = common::release(
+        &cs,
+        *name.as_bytes(),
         receipt,
-    }) else {
-        panic!()
-    };
+        spark_tokens::class_for(size),
+    );
+    assert!(matches!(response, content::Response::Released { .. }));
+    let refund_token = refund_token.unwrap();
     assert_eq!(
         ks.handle(keyring::Request::CreditRefund(
             auth(&ks, &alice),
-            voucher.clone(),
-            size
+            refund_claim,
+            refund_token.clone()
         )),
         keyring::Response::Credited
     );
@@ -444,10 +462,10 @@ fn releasing_refunds_quota_without_relinking_the_upload() {
     assert_eq!(
         ks.handle(keyring::Request::CreditRefund(
             auth(&ks, &alice),
-            voucher,
-            size
+            refund_claim,
+            refund_token
         )),
-        keyring::Response::Refused(keyring::Refusal::VoucherSpent)
+        keyring::Response::Credited
     );
 }
 
@@ -478,6 +496,7 @@ fn the_upload_list_never_judges_what_is_unused() {
     k.apply(&Delta::UpsertRoom(KeyRoom {
         id: ROOM,
         generations: vec![Generation {
+            members: vec![],
             epoch: 0,
             root: Secret::new([1; 32]),
             my_next: 0,

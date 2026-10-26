@@ -62,6 +62,8 @@ pub enum ClientError {
     Unscrubbable,
     /// Quota is exhausted, or the service would not issue a token.
     NoQuota,
+    /// Resume the journaled upload before starting a new send.
+    PendingUpload,
     /// Local state is inconsistent with what came back.
     Corrupt,
 }
@@ -83,6 +85,7 @@ impl core::fmt::Display for ClientError {
                 f.write_str("this file type may carry location data Spark cannot remove")
             }
             Self::NoQuota => f.write_str("not enough storage left"),
+            Self::PendingUpload => f.write_str("retry the pending upload before sending again"),
             Self::Corrupt => f.write_str("local state does not match the server"),
         }
     }
@@ -95,9 +98,10 @@ pub struct Client<S: Services> {
     signer: Signer,
     provider: OpenMlsRustCrypto,
     keyring: Keyring,
+    snapshot_version: (Option<[u8; 32]>, u32),
+    pending_snapshot: Option<(Vec<u8>, Vec<[u8; 32]>)>,
     rooms: BTreeMap<RoomId, MlsRoom>,
     services: S,
-    serial: u8,
     /// Decrypted history, per room.
     ///
     /// A running client holds the conversation it is showing; that is what a
@@ -105,6 +109,7 @@ pub struct Client<S: Services> {
     /// roots in the keyring are, because those unlock everything, but the messages
     /// on screen are the thing the user asked to see.
     history: BTreeMap<RoomId, Vec<Entry>>,
+    scans: BTreeMap<(RoomId, u64, [u8; 16]), (u64, u64, u64)>,
 }
 
 impl<S: Services> Client<S> {
@@ -137,10 +142,12 @@ impl<S: Services> Client<S> {
             signer,
             provider,
             keyring: Keyring::new(),
+            snapshot_version: (None, 0),
+            pending_snapshot: None,
             rooms: BTreeMap::new(),
             services,
-            serial: 0,
             history: BTreeMap::new(),
+            scans: BTreeMap::new(),
         };
         c.load_keyring()?;
         c.load_mls()?;
@@ -181,9 +188,10 @@ impl<S: Services> Client<S> {
         self.keyring.bytes_held()
     }
 
-    fn auth(&self) -> Auth {
+    fn auth(&self) -> Auth<'_> {
         let addr = *self.identity.addr().as_bytes();
         Auth {
+            signer: Some(&self.identity),
             addr,
             key: *self.identity.public().sign.as_bytes(),
             sig: *self
@@ -196,16 +204,36 @@ impl<S: Services> Client<S> {
     fn load_keyring(&mut self) -> Result<(), ClientError> {
         let auth = self.auth();
         let Some(snap) = self.services.keyring().snapshot(&auth)? else {
+            if !self.services.keyring().deltas(&auth)?.is_empty() {
+                return Err(ClientError::Corrupt);
+            }
             return Ok(()); // a new account
         };
+        let snapshot_hash = spark_crypto::sha256(&snap);
         let snap = Chunk::from_bytes(snap).map_err(|_| ClientError::Corrupt)?;
         let deltas: Vec<Chunk> = self
             .services
             .keyring()
             .deltas(&auth)?
             .into_iter()
-            .filter_map(|b| Chunk::from_bytes(b).ok())
-            .collect();
+            .map(|b| Chunk::from_bytes(b).map_err(|_| ClientError::Corrupt))
+            .collect::<Result<_, _>>()?;
+
+        // A snapshot replaced between the two reads cannot be combined with its successor's deltas.
+        if self
+            .services
+            .keyring()
+            .snapshot(&auth)?
+            .as_deref()
+            .map(spark_crypto::sha256)
+            != Some(snapshot_hash)
+        {
+            return Err(ClientError::Corrupt);
+        }
+        self.snapshot_version = (
+            Some(snapshot_hash),
+            deltas.len().try_into().map_err(|_| ClientError::Corrupt)?,
+        );
         self.keyring = Keyring::restore(&snap, &deltas, self.identity.keyring_key())
             .map_err(|_| ClientError::Corrupt)?;
         Ok(())
@@ -237,9 +265,10 @@ impl<S: Services> Client<S> {
             *values = restored.into_iter().collect();
         }
         for r in &self.keyring.rooms {
-            if let Ok(Some(room)) = MlsRoom::load(&self.provider, &r.mls_group_id) {
-                self.rooms.insert(r.id, room);
-            }
+            let room = MlsRoom::load(&self.provider, &r.mls_group_id)
+                .map_err(|_| ClientError::Corrupt)?
+                .ok_or(ClientError::Corrupt)?;
+            self.rooms.insert(r.id, room);
         }
         Ok(())
     }
@@ -264,24 +293,38 @@ impl<S: Services> Client<S> {
 
     /// Write the whole keyring back, replacing any deltas.
     fn save_keyring<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), ClientError> {
+        if let Some((bytes, permits)) = self.pending_snapshot.as_ref() {
+            self.services.keyring().put_snapshot(
+                &self.auth(),
+                bytes,
+                self.snapshot_version,
+                permits,
+            )?;
+            self.snapshot_version = (Some(spark_crypto::sha256(bytes)), 0);
+            self.pending_snapshot = None;
+        }
         let mut nonce = [0u8; 24];
         rng.fill_bytes(&mut nonce);
         let chunk = self
             .keyring
             .seal_snapshot(self.identity.keyring_key(), &nonce);
+        let permits: Vec<_> = self
+            .keyring
+            .contacts
+            .iter()
+            .map(|c| spark_crypto::sha256(&c.receive_permit))
+            .collect();
+        self.pending_snapshot = Some((chunk.as_bytes().to_vec(), permits.clone()));
         let auth = self.auth();
-        self.services
-            .keyring()
-            .put_snapshot(&auth, chunk.as_bytes())?;
+        self.services.keyring().put_snapshot(
+            &auth,
+            chunk.as_bytes(),
+            self.snapshot_version,
+            &permits,
+        )?;
+        self.snapshot_version = (Some(spark_crypto::sha256(chunk.as_bytes())), 0);
+        self.pending_snapshot = None;
         Ok(())
-    }
-
-    fn next_serial(&mut self) -> [u8; 32] {
-        self.serial = self.serial.wrapping_add(1);
-        let mut s = [0u8; 32];
-        s[0] = self.serial;
-        s[1..9].copy_from_slice(&self.identity.addr().as_bytes()[..8]);
-        s
     }
 
     /// The traffic class a chunk's requests belong to.
@@ -307,39 +350,73 @@ impl<S: Services> Client<S> {
         class: ChunkClass,
         room: Option<RoomId>,
     ) -> Result<(), ClientError> {
-        let der = self.services.keyring().issuer_key()?;
-        let pk = spark_crypto::IssuerPublic::from_der(&der).map_err(|_| ClientError::Corrupt)?;
+        if self.keyring.pending_upload.is_some() {
+            return Err(ClientError::PendingUpload);
+        }
         let size_class = spark_tokens::class_for(chunk.len() as u64);
-
-        // The serial is chosen here and never shown to the issuer. That is what
-        // makes the spend unlinkable to the withdrawal.
-        let serial = self.next_serial();
-        let (blinded, w) = spark_tokens::begin(&pk, rng, &[serial], size_class)
+        let issuer = self.services.keyring().issuer_key(size_class)?;
+        let pk = spark_crypto::IssuerPublic::from_der(&issuer).map_err(|_| ClientError::Corrupt)?;
+        let mut serial = [0; 32];
+        rng.fill_bytes(&mut serial);
+        let claim = spark_crypto::TokenClaim { serial, size_class };
+        let (_, blinding) = pk
+            .blind(rng, &claim.encode())
             .map_err(|_| ClientError::Corrupt)?;
-        let auth = self.auth();
-        let sigs = self
-            .services
-            .keyring()
-            .withdraw(&auth, &blinded, size_class)
-            .map_err(|_| ClientError::NoQuota)?;
-        let spendable = spark_tokens::finish(&pk, w, &sigs).map_err(|_| ClientError::Corrupt)?;
-
-        let receipt = self.services.content().put(
-            Self::traffic_class(class),
-            name.as_bytes(),
-            chunk.as_bytes(),
-            spendable[0].claim,
-            &spendable[0].token,
-        )?;
-
-        self.keyring.apply(&Delta::AddUpload(Upload {
+        self.keyring.pending_upload = Some(spark_keyring::model::PendingUpload {
             name: name.into(),
-            receipt: Receipt(receipt),
-            size: 1u64 << size_class,
+            chunk: chunk.as_bytes().to_vec(),
             class,
             room,
+            claim,
+            issuer,
+            blinding: blinding.save(),
+        });
+        self.retry_pending_upload(rng)
+    }
+
+    /// Resume exactly the interrupted upload, including after seed recovery.
+    /// Does nothing when no upload is pending. Never starts a new send.
+    pub fn retry_pending_upload<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(), ClientError> {
+        let Some(pending) = self.keyring.pending_upload.clone() else {
+            return Ok(());
+        };
+        self.save_keyring(rng)?;
+        let pk = spark_crypto::IssuerPublic::from_der(&pending.issuer)
+            .map_err(|_| ClientError::Corrupt)?;
+        let sigs = self.services.keyring().withdraw(
+            &self.auth(),
+            &[pending.blinding.message().to_vec()],
+            pending.claim.size_class,
+        )?;
+        if sigs.len() != 1 {
+            return Err(ClientError::Corrupt);
+        }
+        let token = pk
+            .finalize(
+                pending.blinding.restore(),
+                &sigs[0],
+                &pending.claim.encode(),
+            )
+            .map_err(|_| ClientError::Corrupt)?;
+        let receipt = self.services.content().put(
+            Self::traffic_class(pending.class),
+            &pending.name.0,
+            &pending.chunk,
+            pending.claim,
+            &token,
+        )?;
+        self.keyring.apply(&Delta::AddUpload(Upload {
+            name: pending.name,
+            receipt: Receipt(receipt),
+            size: 1u64 << pending.claim.size_class,
+            class: pending.class,
+            room: pending.room,
         }));
-        Ok(())
+        self.keyring.pending_upload = None;
+        self.save_keyring(rng)
     }
 }
 
@@ -388,6 +465,7 @@ impl<S: Services> Client<S> {
                 epoch: mls.generation(),
                 root,
                 my_next: 0,
+                members: mls.members().iter().map(|k| *k.as_bytes()).collect(),
             },
         });
         Ok(())
@@ -397,6 +475,18 @@ impl<S: Services> Client<S> {
     pub fn key_package(&self) -> Result<Vec<u8>, ClientError> {
         publish_key_package(&self.provider, &self.identity.public().sign, &self.signer)
             .map_err(|_| ClientError::Mls)
+    }
+
+    /// Publish a key package and save its private join state before returning.
+    /// This lets a separate process accept the resulting invitation later.
+    pub fn saved_key_package<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, ClientError> {
+        let package = self.key_package()?;
+        self.save_mls()?;
+        self.save_keyring(rng)?;
+        Ok(package)
     }
 
     /// Add someone to a room, given their key package. Owners only.
@@ -426,6 +516,7 @@ impl<S: Services> Client<S> {
                 epoch,
                 root,
                 my_next: 0,
+                members: m.members().iter().map(|k| *k.as_bytes()).collect(),
             },
         });
 
@@ -435,7 +526,7 @@ impl<S: Services> Client<S> {
             .ok_or(ClientError::NoSuchRoom)?
             .generations
             .iter()
-            .map(|g| (g.epoch, *g.root.expose()))
+            .map(|g| (g.epoch, *g.root.expose(), g.members.clone()))
             .collect();
 
         self.save_mls()?;
@@ -464,16 +555,21 @@ impl<S: Services> Client<S> {
         }));
         // The re-shared past, then the current generation this account can derive
         // for itself.
-        for (epoch, root) in &inv.generations {
+        for (epoch, root, members) in &inv.generations {
+            if *epoch >= mls.generation() {
+                continue;
+            }
             self.keyring.apply(&Delta::OpenGeneration {
                 room: inv.room,
                 generation: Generation {
                     epoch: *epoch,
                     root: Secret::new(*root),
                     my_next: 0,
+                    members: members.clone(),
                 },
             });
         }
+        self.open_generation(inv.room, &mls)?;
         let gid = mls.group_id();
         self.rooms.insert(inv.room, mls);
         if let Some(r) = self.keyring.rooms.iter_mut().find(|r| r.id == inv.room) {
@@ -495,6 +591,9 @@ impl<S: Services> Client<S> {
         id: RoomId,
         body: &[u8],
     ) -> Result<(), ClientError> {
+        if self.keyring.pending_upload.is_some() {
+            return Err(ClientError::PendingUpload);
+        }
         let mls = self.rooms.get(&id).ok_or(ClientError::NoSuchRoom)?;
         let epoch = mls.generation();
         let lane = LaneId::message(&self.identity.public().sign);
@@ -503,20 +602,15 @@ impl<S: Services> Client<S> {
         // *read* would make this client overwrite its own last message.
         let mut outbox = Outbox::new(id, epoch, lane, self.keyring.my_next(id, epoch));
 
-        // Reserve, persist, then seal. Encrypt-then-record loses to a crash in
-        // between, which would produce two ciphertexts under one nonce.
+        if outbox.next_seq() == u64::MAX {
+            return Err(ClientError::Corrupt);
+        }
+        // Reserve before sealing so ordinary crash recovery skips consumed slots.
+        // Random nonces keep stale/concurrent cursors from reusing the keystream.
         let (reservation, delta) = outbox.reserve();
         self.keyring.apply(&delta);
-        self.save_keyring(rng)?;
 
         let slot = reservation.consume();
-        let signed = Signed::new(
-            slot,
-            epoch,
-            body.to_vec(),
-            &self.identity.public().sign,
-            |m| self.identity.sign(m),
-        );
         // What this client had seen when it wrote. That is what makes a reply
         // causally later than the message it replies to.
         let mut clock = spark_sync::Clock::new();
@@ -525,10 +619,28 @@ impl<S: Services> Client<S> {
                 clock.observe(e.lane(), e.seq);
             }
         }
+        let root = self.generation_root(id, epoch)?;
+        let signed = Signed::new(
+            &room::signature_context(
+                &self
+                    .keyring
+                    .room(id)
+                    .ok_or(ClientError::NoSuchRoom)?
+                    .mls_group_id,
+                &root,
+            ),
+            &clock,
+            slot,
+            epoch,
+            body.to_vec(),
+            &self.identity.public().sign,
+            |m| self.identity.sign(m),
+        );
         let entry = Entry::new(slot, epoch, clock, Payload::Application(signed));
 
-        let root = self.generation_root(id, epoch)?;
-        let (name, chunk) = room::seal(&root, slot, &entry.encode());
+        let mut nonce = [0; 24];
+        rng.fill_bytes(&mut nonce);
+        let (name, chunk) = room::seal(&root, slot, &nonce, &entry.encode());
         self.upload(rng, name, &chunk, ChunkClass::RoomLog, Some(id))?;
         self.save_keyring(rng)?;
         Ok(())
@@ -545,6 +657,67 @@ impl<S: Services> Client<S> {
             .ok_or(ClientError::Corrupt)
     }
 
+    fn fetch_entry(
+        &self,
+        id: RoomId,
+        epoch: u64,
+        root: &room::RoomRoot,
+        slot: Slot,
+    ) -> Result<Option<Entry>, ClientError> {
+        let name = room::name(root, slot);
+        let Some(bytes) = self.services.content().get(Class::Text, name.as_bytes())? else {
+            return Ok(None);
+        };
+        let chunk = Chunk::from_bytes(bytes).map_err(|_| ClientError::Corrupt)?;
+        let plain = room::open(root, slot, &chunk).map_err(|_| ClientError::Corrupt)?;
+        let e = Entry::decode(&plain, slot).map_err(|_| ClientError::Corrupt)?;
+        if e.epoch != epoch {
+            return Err(ClientError::Corrupt);
+        }
+        let Payload::Application(ref signed) = e.payload else {
+            return Err(ClientError::Corrupt);
+        };
+        let r = self.keyring.room(id).ok_or(ClientError::NoSuchRoom)?;
+        let generation = r
+            .generations
+            .iter()
+            .find(|g| g.epoch == epoch)
+            .ok_or(ClientError::Corrupt)?;
+        // Clocks are attacker-controlled claims. Unknown lanes cannot create
+        // ordering work or masquerade as membership observations.
+        if e.clock.len() > generation.members.len() {
+            return Err(ClientError::Corrupt);
+        }
+        let lanes: std::collections::BTreeSet<_> = generation
+            .members
+            .iter()
+            .map(|key| spark_crypto::VerifyingKey::from_bytes(key).map(|k| LaneId::message(&k)))
+            .collect::<Result<_, _>>()
+            .map_err(|_| ClientError::Corrupt)?;
+        if e.clock.lanes().any(|lane| !lanes.contains(&lane)) {
+            return Err(ClientError::Corrupt);
+        }
+        let from = signed
+            .verify(
+                &room::signature_context(&r.mls_group_id, root),
+                &e.clock,
+                slot,
+                epoch,
+            )
+            .map_err(|_| ClientError::Corrupt)?;
+        if !r
+            .generations
+            .iter()
+            .find(|g| g.epoch == epoch)
+            .ok_or(ClientError::Corrupt)?
+            .members
+            .contains(from.as_bytes())
+        {
+            return Err(ClientError::Corrupt);
+        }
+        Ok(Some(e))
+    }
+
     /// Fetch whatever is new and return the room's history in order.
     ///
     /// Returns the *whole* conversation, not only what this call retrieved.
@@ -557,60 +730,78 @@ impl<S: Services> Client<S> {
     pub fn sync(&mut self, id: RoomId, probe_ahead: u64) -> Result<Vec<Message>, ClientError> {
         let room_gens: Vec<(u64, room::RoomRoot, Vec<LaneId>)> = {
             let r = self.keyring.room(id).ok_or(ClientError::NoSuchRoom)?;
-            let mut lanes: Vec<LaneId> = vec![LaneId::message(&self.identity.public().sign)];
-            if let Some(mls) = self.rooms.get(&id) {
-                for m in mls.members() {
-                    let l = LaneId::message(&m);
-                    if !lanes.contains(&l) {
-                        lanes.push(l);
-                    }
-                }
-            }
             r.generations
                 .iter()
-                .map(|g| (g.epoch, g.root.clone(), lanes.clone()))
+                .map(|g| {
+                    (
+                        g.epoch,
+                        g.root.clone(),
+                        g.members
+                            .iter()
+                            .filter_map(|b| spark_crypto::VerifyingKey::from_bytes(b).ok())
+                            .map(|k| LaneId::message(&k))
+                            .collect(),
+                    )
+                })
                 .collect()
         };
 
-        // The read cursor is derived from what this client already holds, not
-        // stored. A cursor persisted in the keyring survives a wipe while the
-        // messages behind it do not, so a restored client would resume past a
-        // history it no longer has and never fetch it.
-        let entries = self.history.entry(id).or_default();
-        let known: std::collections::BTreeSet<(Vec<u8>, u64)> =
-            entries.iter().map(|e| (e.lane.to_vec(), e.seq)).collect();
-        let mut resume: BTreeMap<(u64, [u8; 16]), u64> = BTreeMap::new();
-        for e in entries.iter() {
-            let k = (e.epoch, e.lane);
-            let v = resume.entry(k).or_insert(0);
-            *v = (*v).max(e.seq + 1);
-        }
-        let mut fetched: Vec<Entry> = Vec::new();
+        // Scan cursors are disposable, like plaintext history. Continue through long
+        // gaps on later calls, and revisit holes so temporary withholding is not final.
+        let known: std::collections::BTreeSet<(u64, [u8; 16], u64)> = self
+            .history
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|e| (e.epoch, e.lane, e.seq))
+            .collect();
+        let mut fetched = Vec::new();
         for (epoch, root, lanes) in room_gens {
             for lane in lanes {
-                let start = resume.get(&(epoch, *lane.as_bytes())).copied().unwrap_or(0);
-                let mut misses = 0u64;
-                let mut seq = start;
-                while misses < probe_ahead.max(1) {
-                    let slot = Slot::new(lane, seq);
-                    let name = room::name(&root, slot);
-                    match self.services.content().get(Class::Text, name.as_bytes())? {
-                        Some(bytes) => {
+                let scan_key = (id, epoch, *lane.as_bytes());
+                let (start, mut backfill, mut sweep_end) =
+                    self.scans.get(&scan_key).copied().unwrap_or((0, 0, 0));
+                let mut next = start;
+                let mut misses = 0;
+                for _ in 0..256 {
+                    let slot = Slot::new(lane, next);
+                    let Some(after) = next.checked_add(1) else {
+                        break;
+                    };
+                    next = after;
+                    match self.fetch_entry(id, epoch, &root, slot) {
+                        Ok(Some(e)) => {
                             misses = 0;
-                            let chunk =
-                                Chunk::from_bytes(bytes).map_err(|_| ClientError::Corrupt)?;
-                            let plain = room::open(&root, slot, &chunk)
-                                .map_err(|_| ClientError::Corrupt)?;
-                            let e =
-                                Entry::decode(&plain, slot).map_err(|_| ClientError::Corrupt)?;
-                            if !known.contains(&(e.lane.to_vec(), e.seq)) {
+                            if !known.contains(&(epoch, e.lane, e.seq)) {
                                 fetched.push(e);
                             }
                         }
-                        None => misses += 1,
+                        Ok(None) | Err(ClientError::Corrupt) => misses += 1,
+                        Err(e) => return Err(e),
                     }
-                    seq += 1;
+                    if misses >= probe_ahead.clamp(1, 256) {
+                        break;
+                    }
                 }
+                // A separate rotating budget repairs earlier temporary holes.
+                for _ in 0..256 {
+                    if backfill >= sweep_end {
+                        backfill = 0;
+                        sweep_end = next;
+                        break;
+                    }
+                    let slot = Slot::new(lane, backfill);
+                    backfill += 1;
+                    if known.contains(&(epoch, *lane.as_bytes(), slot.seq)) {
+                        continue;
+                    }
+                    match self.fetch_entry(id, epoch, &root, slot) {
+                        Ok(Some(e)) => fetched.push(e),
+                        Ok(None) | Err(ClientError::Corrupt) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                self.scans.insert(scan_key, (next, backfill, sweep_end));
             }
         }
 
@@ -625,14 +816,138 @@ impl<S: Services> Client<S> {
                 // Authorship is verified here, not assumed. An entry whose
                 // signature does not check is dropped rather than shown: it is
                 // not a message from anyone.
-                Payload::Application(s) => s.verify(e.slot(), e.epoch).ok().map(|from| Message {
-                    from,
+                Payload::Application(s) => Some(Message {
+                    from: spark_crypto::VerifyingKey::from_bytes(&s.sender)
+                        .expect("verified on ingress"),
                     body: s.body.clone(),
                     generation: e.epoch,
                 }),
                 _ => None,
             })
             .collect())
+    }
+
+    /// Contacts approved by this account, restored with the encrypted keyring.
+    pub fn contacts(&self) -> &[spark_keyring::model::Contact] {
+        &self.keyring.contacts
+    }
+
+    /// Add/update an approved contact and return our confidential reply card.
+    /// A card is 64 public identity bytes followed by a 32-byte inbox permit.
+    pub fn add_contact<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        name: &str,
+        identity: &[u8; 64],
+        permit: Option<[u8; 32]>,
+    ) -> Result<Vec<u8>, ClientError> {
+        if name.trim().is_empty() || name.len() > 256 {
+            return Err(ClientError::Corrupt);
+        }
+        let sign: [u8; 32] = identity[..32].try_into().unwrap();
+        spark_crypto::VerifyingKey::from_bytes(&sign).map_err(|_| ClientError::Corrupt)?;
+        let kem = identity[32..].try_into().unwrap();
+        let mut next = self.keyring.contacts.clone();
+        let receive_permit = if let Some(c) = next.iter_mut().find(|c| c.sign == sign) {
+            if c.kem != kem {
+                return Err(ClientError::Corrupt);
+            }
+            c.name = name.to_owned();
+            if permit.is_some() {
+                c.send_permit = permit;
+            }
+            c.receive_permit
+        } else {
+            if next.len() >= 64 {
+                return Err(ClientError::Corrupt);
+            }
+            let mut receive_permit = [0; 32];
+            rng.fill_bytes(&mut receive_permit);
+            next.push(spark_keyring::model::Contact {
+                name: name.into(),
+                sign,
+                kem,
+                receive_permit,
+                send_permit: permit,
+            });
+            receive_permit
+        };
+        self.keyring.contacts = next;
+        self.save_keyring(rng)?;
+        let me = self.identity.public();
+        Ok([
+            me.sign.as_bytes().as_slice(),
+            me.kem.as_bytes(),
+            &receive_permit,
+        ]
+        .concat())
+    }
+
+    /// Revoke a contact's inbox access.
+    pub fn remove_contact<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        sign: &[u8; 32],
+    ) -> Result<(), ClientError> {
+        self.keyring.contacts.retain(|c| &c.sign != sign);
+        self.save_keyring(rng)
+    }
+
+    /// Send a signed, sealed note using a contact's explicit inbox permission.
+    pub fn contact_note<R: CryptoRng + ?Sized>(
+        &self,
+        rng: &mut R,
+        sign: &[u8; 32],
+        note: &str,
+    ) -> Result<(), ClientError> {
+        let contact = self
+            .keyring
+            .contacts
+            .iter()
+            .find(|c| &c.sign == sign)
+            .ok_or(ClientError::Corrupt)?;
+        let permit = contact.send_permit.ok_or(ClientError::Corrupt)?;
+        if note.len() > 8 * 1024 {
+            return Err(ClientError::Corrupt);
+        }
+        let mut ephemeral = [0; 32];
+        rng.fill_bytes(&mut ephemeral);
+        let recipient = spark_identity::PublicIdentity {
+            sign: spark_crypto::VerifyingKey::from_bytes(sign).map_err(|_| ClientError::Corrupt)?,
+            kem: spark_crypto::KemPublic::from_bytes(contact.kem),
+        };
+        let sealed = spark_identity::reach::seal_request(
+            &recipient.kem,
+            &self.identity,
+            note,
+            None,
+            Secret::new(ephemeral),
+        );
+        self.services.keyring().put_request(
+            recipient.addr().as_bytes(),
+            sealed.as_bytes(),
+            &permit,
+        )?;
+        Ok(())
+    }
+
+    /// Open only authenticated notes from user-approved contacts.
+    pub fn contact_inbox(&self) -> Result<Vec<spark_identity::reach::OpenRequest>, ClientError> {
+        let auth = self.auth();
+        let mut out = Vec::new();
+        for (index, bytes) in self.services.keyring().requests(&auth)? {
+            if let Ok(note) = spark_identity::reach::open_request(
+                &self.identity,
+                &spark_identity::reach::SealedRequest::from_bytes(bytes),
+                None,
+            ) && self.keyring.contacts.get(index as usize).is_some_and(|c| {
+                c.sign == *note.from.sign.as_bytes() && c.kem == *note.from.kem.as_bytes()
+            }) {
+                out.push(note);
+            }
+            self.services.keyring().drop_request(&auth, index)?;
+        }
+        Ok(out)
     }
 
     /// Share a file. Its metadata is stripped first, and it is refused outright if
@@ -650,6 +965,72 @@ impl<S: Services> Client<S> {
         Ok((name, key))
     }
 
+    /// Release an upload and redeem its blind refund without linking the receipt to this account.
+    pub fn release_upload<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        name: ChunkName,
+    ) -> Result<(), ClientError> {
+        let upload = self
+            .keyring
+            .uploads
+            .iter()
+            .find(|u| u.name.0 == *name.as_bytes())
+            .cloned()
+            .ok_or(ClientError::Corrupt)?;
+        let size_class = spark_tokens::class_for(upload.size);
+        let class = Self::traffic_class(upload.class);
+        let pending = match self
+            .keyring
+            .refunds
+            .iter()
+            .find(|r| r.receipt == upload.receipt)
+        {
+            Some(pending) => pending.clone(),
+            None => {
+                let issuer = self.services.content().refund_key(class, size_class)?;
+                let pk = spark_crypto::IssuerPublic::from_der(&issuer)
+                    .map_err(|_| ClientError::Corrupt)?;
+                let mut serial = [0; 32];
+                rng.fill_bytes(&mut serial);
+                let claim = spark_crypto::TokenClaim { serial, size_class };
+                let (_, blinding) = pk
+                    .blind(rng, &claim.refund_message())
+                    .map_err(|_| ClientError::Corrupt)?;
+                let pending = spark_keyring::model::PendingRefund {
+                    receipt: upload.receipt,
+                    claim,
+                    issuer,
+                    blinding: blinding.save(),
+                };
+                self.keyring.refunds.push(pending.clone());
+                pending
+            }
+        };
+        // Every attempt persists first, including retry after an ambiguous save.
+        self.save_keyring(rng)?;
+        let pk = spark_crypto::IssuerPublic::from_der(&pending.issuer)
+            .map_err(|_| ClientError::Corrupt)?;
+        let claim = pending.claim;
+        let message = claim.refund_message();
+        let blinded = pending.blinding.message();
+        let sig = self.services.content().release(
+            class,
+            name.as_bytes(),
+            &upload.receipt.0,
+            size_class,
+            &blinded,
+        )?;
+        let token = pk
+            .finalize(pending.blinding.restore(), &sig, &message)
+            .map_err(|_| ClientError::Corrupt)?;
+        self.services
+            .keyring()
+            .credit_refund(&self.auth(), claim, &token)?;
+        self.keyring.apply(&Delta::ReleaseUpload(upload.receipt));
+        self.save_keyring(rng)
+    }
+
     /// Fetch a shared file by its capability.
     pub fn fetch_file(&self, name: ChunkName, key: &Secret<32>) -> Result<Vec<u8>, ClientError> {
         let bytes = self
@@ -658,6 +1039,11 @@ impl<S: Services> Client<S> {
             .get(Class::Media, name.as_bytes())?
             .ok_or(ClientError::Service(ServiceError::NotFound))?;
         let chunk = Chunk::from_bytes(bytes).map_err(|_| ClientError::Corrupt)?;
+        if chunk.kind().map_err(|_| ClientError::Corrupt)? != spark_chunk::Kind::Media
+            || spark_chunk::media::name_of(&chunk) != name
+        {
+            return Err(ClientError::Corrupt);
+        }
         Ok(spark_chunk::media::open(&chunk, key)
             .map_err(|_| ClientError::Corrupt)?
             .to_vec())
@@ -698,7 +1084,7 @@ pub struct Invitation {
     /// The MLS welcome.
     pub welcome: Vec<u8>,
     /// Every generation the joiner cannot derive for itself: `(epoch, root)`.
-    pub generations: Vec<(u64, [u8; 32])>,
+    pub generations: Vec<(u64, [u8; 32], Vec<[u8; 32]>)>,
     /// Which room.
     pub room: RoomId,
 }

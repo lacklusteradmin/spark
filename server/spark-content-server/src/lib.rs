@@ -9,9 +9,8 @@
 //! Three rules here are each load-bearing for something in the spec, and each is
 //! easy to "improve" into a leak:
 //!
-//! * **Write-once per name.** The commit lane's arbitration point (§4) and the
-//!   backstop that makes derived room-chunk nonces safe (§3.2). A store that
-//!   allowed overwrite would silently break the AEAD, not merely the ordering.
+//! * **Write-once per name.** The commit lane's arbitration point (§4).
+//!   Cryptographic nonce safety comes from random nonces, including losing writes.
 //! * **No discount for a chunk that already exists.** A cheaper duplicate upload
 //!   would let anyone probe what Spark holds (build-notes §4). The token is spent
 //!   either way, and the caller is told nothing about which case occurred.
@@ -25,7 +24,8 @@
 pub mod wire;
 
 use spark_chunk::{Chunk, Kind, media};
-use spark_crypto::{IssuerPublic, Token, TokenClaim, verify_any};
+use spark_crypto::{IssuerPublic, Token, TokenClaim};
+use spark_store::mint::{Mint, PublicKeys};
 use spark_store::{Cell, Db};
 
 /// Table of stored chunks, keyed by chunk name.
@@ -66,12 +66,20 @@ pub enum Request {
         name: [u8; 32],
         /// The receipt issued at upload.
         receipt: [u8; 32],
+        /// Refund denomination, checked against the original receipt.
+        size_class: u8,
+        /// Client-blinded refund claim; the store cannot recognize the redeemed serial.
+        blinded: Vec<u8>,
     },
     /// Delete a room chunk outright, at dissolve.
     Delete {
         /// The chunk.
         name: [u8; 32],
+        /// Independent write capability, never derivable from the room read key.
+        receipt: [u8; 32],
     },
+    /// Obtain the public refund key for a denomination.
+    GetRefundKey(u8),
 }
 
 /// A response from the content service.
@@ -94,6 +102,8 @@ pub enum Response {
         /// A blinded refund voucher, which the store cannot link to the release.
         voucher: Vec<u8>,
     },
+    /// DER-encoded public refund key.
+    RefundKey(Vec<u8>),
     /// Deleted.
     Deleted,
     /// Refused, with a reason that tells the caller nothing it did not know.
@@ -132,11 +142,9 @@ pub struct Content {
     /// A list rather than one key so the issuer can rotate — which bounds the
     /// blast radius of RUSTSEC-2023-0071 — without invalidating every unspent
     /// token a user is holding.
-    issuers: Vec<IssuerPublic>,
-    /// Supplies receipts and voucher blinding. A parameter, not a syscall — the
-    /// same discipline as everywhere below the I/O line, and it keeps this
-    /// service's tests deterministic.
-    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    issuers: PublicKeys,
+    refunds: std::sync::Arc<std::sync::Mutex<Mint>>,
+    operation: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -150,15 +158,17 @@ impl Content {
     /// Only the public half. This service cannot mint a token, and therefore
     /// cannot forge the evidence that someone paid for an upload.
     pub fn new(db: Db, issuer: IssuerPublic) -> Self {
-        Self::with_keys(db, vec![issuer])
+        Self::with_keys(db, PublicKeys::single(20, issuer))
     }
 
     /// As [`Content::new`], accepting several issuer keys during a rotation.
-    pub fn with_keys(db: Db, issuers: Vec<IssuerPublic>) -> Self {
+    pub fn with_keys(db: Db, issuers: PublicKeys) -> Self {
+        let refunds = Mint::persisted(&db, "refund", None);
         Self {
             db,
             issuers,
-            counter: Default::default(),
+            refunds: std::sync::Arc::new(std::sync::Mutex::new(refunds)),
+            operation: Default::default(),
         }
     }
 
@@ -167,20 +177,33 @@ impl Content {
         &self.db
     }
 
-    /// Deterministic stand-in for the random receipts and blinded vouchers the
-    /// real service issues. Stage 8 replaces this with RFC 9474.
+    /// Public-only refund registry, provisioned at the keyring service.
+    pub fn refund_keys(&self) -> PublicKeys {
+        self.refunds.lock().unwrap().public_keys()
+    }
+
     fn opaque(&self) -> [u8; 32] {
-        let n = self
-            .counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let mut out = [0u8; 32];
-        out[..8].copy_from_slice(&n.to_be_bytes());
-        out[8..16].copy_from_slice(b"receipt-");
-        out
+        let mut receipt = [0; 32];
+        use spark_crypto::blind::TryRng;
+        spark_store::mint::OsRandom
+            .try_fill_bytes(&mut receipt)
+            .expect("entropy");
+        receipt
     }
 
     /// Handle one request.
     pub fn handle(&self, req: Request) -> Response {
+        let transaction = self
+            .db
+            .transaction()
+            .expect("service transaction unavailable");
+        let response = self.handle_inner(req);
+        transaction.commit().expect("service commit failed");
+        response
+    }
+
+    fn handle_inner(&self, req: Request) -> Response {
+        let _operation = self.operation.lock().unwrap();
         match req {
             Request::Put {
                 name,
@@ -189,19 +212,44 @@ impl Content {
                 token,
             } => self.put(name, chunk, claim, token),
             Request::Get { name } => match self.db.field(T_CHUNK, &hex(&name), "chunk_bytes") {
-                Some(Cell::Bytes(b)) => Response::Chunk(b),
+                Some(Cell::Bytes(b)) if !b.is_empty() => Response::Chunk(b),
                 _ => Response::Refused(Refusal::NotFound),
             },
-            Request::Head { name } => Response::Exists(self.db.has(T_CHUNK, &hex(&name))),
-            Request::Release { name, receipt } => self.release(name, receipt),
-            Request::Delete { name } => self.delete(name),
+            Request::Head { name } => Response::Exists(
+                self.db
+                    .field(T_CHUNK, &hex(&name), "chunk_len")
+                    .and_then(|c| c.num())
+                    .is_some_and(|n| n > 0),
+            ),
+            Request::Release {
+                name,
+                receipt,
+                size_class,
+                blinded,
+            } => self.release(name, receipt, size_class, blinded),
+            Request::Delete { name, receipt } => self.delete(name, receipt),
+            Request::GetRefundKey(class) => {
+                match self
+                    .refunds
+                    .lock()
+                    .unwrap()
+                    .key(class)
+                    .and_then(|k| k.public().to_der().ok())
+                {
+                    Some(k) => Response::RefundKey(k),
+                    None => Response::Refused(Refusal::Malformed),
+                }
+            }
         }
     }
 
     fn put(&self, name: [u8; 32], bytes: Vec<u8>, claim: TokenClaim, token: Token) -> Response {
         // Verify before spending: an unsigned serial must not be able to burn a
         // slot in the spent list, or anyone could lock out a token they guessed.
-        if verify_any(&self.issuers, &token, &claim.encode()).is_err() {
+        if !self
+            .issuers
+            .verify(claim.size_class, &token, &claim.encode())
+        {
             return Response::Refused(Refusal::BadToken);
         }
         if bytes.len() as u64 > claim.max_bytes() {
@@ -212,6 +260,7 @@ impl Content {
         // nothing about who drew the token, which is the entire point of signing
         // it blind.
         let serial = hex(&claim.serial);
+        let request_hash = spark_crypto::sha256_parts(&[&name, &bytes, &claim.encode()]);
         // Spend it whatever happens next. Refunding on a duplicate would be
         // exactly the discount that lets a caller probe what the store holds.
         if !self.db.put_if_absent(
@@ -219,6 +268,22 @@ impl Content {
             &serial,
             vec![("spent_token_serial", Cell::Bytes(claim.serial.to_vec()))],
         ) {
+            if self
+                .db
+                .field(T_TOKEN, &serial, "upload_request_hash")
+                .and_then(|c| c.bytes().map(|b| b == request_hash))
+                .unwrap_or(false)
+            {
+                let receipt = self
+                    .db
+                    .field(T_TOKEN, &serial, "upload_receipt")
+                    .unwrap()
+                    .bytes()
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                return Response::Stored { receipt };
+            }
             return Response::Refused(Refusal::TokenSpent);
         }
 
@@ -237,6 +302,9 @@ impl Content {
             return Response::Refused(Refusal::NameMismatch);
         }
 
+        if kind == Kind::Keyring || (kind == Kind::RoomLog && name[0] & 0x80 == 0) {
+            return Response::Refused(Refusal::Malformed);
+        }
         let key = hex(&name);
         let receipt = self.opaque();
         let stored = self.db.put_if_absent(
@@ -262,22 +330,82 @@ impl Content {
         self.db.bump(T_CHUNK, &key, "receipt_count", 1, vec![]);
         self.db.put(
             T_RECEIPT,
-            &format!("{key}:{}", hex(&receipt)),
+            &format!("{key}:{}", hex(&spark_crypto::sha256(&receipt))),
             vec![
                 ("chunk_name", Cell::Text(key)),
-                ("receipt_hash", Cell::Bytes(receipt.to_vec())),
+                (
+                    "receipt_hash",
+                    Cell::Bytes(spark_crypto::sha256(&receipt).to_vec()),
+                ),
+                ("receipt_size_class", Cell::Num(claim.size_class as u64)),
+            ],
+        );
+        self.db.put(
+            T_TOKEN,
+            &serial,
+            vec![
+                ("spent_token_serial", Cell::Bytes(claim.serial.to_vec())),
+                ("upload_request_hash", Cell::Bytes(request_hash.to_vec())),
+                ("upload_receipt", Cell::Bytes(receipt.to_vec())),
             ],
         );
         Response::Stored { receipt }
     }
 
-    fn release(&self, name: [u8; 32], receipt: [u8; 32]) -> Response {
+    fn release(
+        &self,
+        name: [u8; 32],
+        receipt: [u8; 32],
+        size_class: u8,
+        blinded: Vec<u8>,
+    ) -> Response {
         let key = hex(&name);
-        let rkey = format!("{key}:{}", hex(&receipt));
+        let rkey = format!("{key}:{}", hex(&spark_crypto::sha256(&receipt)));
+        let retry_key = spark_crypto::sha256_parts(&[&[size_class], &blinded]);
+        if let Some(old) = self.db.field(T_RECEIPT, &rkey, "refund_request_hash") {
+            if old.bytes() != Some(retry_key.as_slice()) {
+                return Response::Refused(Refusal::BadReceipt);
+            }
+            let voucher = self
+                .db
+                .field(T_RECEIPT, &rkey, "refund_response")
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .to_vec();
+            return Response::Released {
+                freed: !self.db.has(T_CHUNK, &key),
+                voucher,
+            };
+        }
         if !self.db.has(T_RECEIPT, &rkey) {
             return Response::Refused(Refusal::BadReceipt);
         }
-        self.db.delete(T_RECEIPT, &rkey);
+        if self
+            .db
+            .field(T_RECEIPT, &rkey, "receipt_size_class")
+            .and_then(|c| c.num())
+            != Some(size_class as u64)
+        {
+            return Response::Refused(Refusal::BadReceipt);
+        }
+        let Some(voucher) = self
+            .refunds
+            .lock()
+            .unwrap()
+            .key(size_class)
+            .and_then(|k| k.blind_sign(&blinded).ok())
+        else {
+            return Response::Refused(Refusal::Malformed);
+        };
+        self.db.put(
+            T_RECEIPT,
+            &rkey,
+            vec![
+                ("refund_request_hash", Cell::Bytes(retry_key.to_vec())),
+                ("refund_response", Cell::Bytes(voucher.clone())),
+            ],
+        );
         self.db.bump(T_CHUNK, &key, "receipt_count", -1, vec![]);
 
         let count = self
@@ -291,14 +419,28 @@ impl Content {
         }
         // The voucher is blinded: the store does not know whose release it just
         // signed, which is what stops the refund rejoining upload to identity.
-        Response::Released {
-            freed,
-            voucher: self.opaque().to_vec(),
-        }
+        Response::Released { freed, voucher }
     }
 
-    fn delete(&self, name: [u8; 32]) -> Response {
+    fn delete(&self, name: [u8; 32], receipt: [u8; 32]) -> Response {
         let key = hex(&name);
+        if !self.db.has(
+            T_RECEIPT,
+            &format!("{key}:{}", hex(&spark_crypto::sha256(&receipt))),
+        ) {
+            return Response::Refused(Refusal::BadReceipt);
+        }
+        if self
+            .db
+            .field(
+                T_RECEIPT,
+                &format!("{key}:{}", hex(&spark_crypto::sha256(&receipt))),
+                "receipt_size_class",
+            )
+            .is_none()
+        {
+            return Response::Refused(Refusal::BadReceipt);
+        }
         match self
             .db
             .field(T_CHUNK, &key, "chunk_kind")
@@ -306,12 +448,22 @@ impl Content {
         {
             None => Response::Refused(Refusal::NotFound),
             Some(k) if k == Kind::RoomLog as u8 as u64 => {
-                for r in self.db.keys(T_RECEIPT) {
-                    if r.starts_with(&format!("{key}:")) {
-                        self.db.delete(T_RECEIPT, &r);
-                    }
-                }
-                self.db.delete(T_CHUNK, &key);
+                let count = self
+                    .db
+                    .field(T_CHUNK, &key, "receipt_count")
+                    .and_then(|c| c.num())
+                    .unwrap_or(0);
+                self.db.put(
+                    T_CHUNK,
+                    &key,
+                    vec![
+                        ("chunk_name", Cell::Text(key.clone())),
+                        ("chunk_bytes", Cell::Bytes(Vec::new())),
+                        ("chunk_len", Cell::Num(0)),
+                        ("chunk_kind", Cell::Num(Kind::RoomLog as u8 as u64)),
+                        ("receipt_count", Cell::Num(count)),
+                    ],
+                );
                 Response::Deleted
             }
             // Media is shared, so it is freed by receipt count and never by one

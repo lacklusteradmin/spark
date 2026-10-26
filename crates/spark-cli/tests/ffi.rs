@@ -50,6 +50,7 @@ fn deployment() -> Config {
         Db::new(),
         keyring.accepted_keys(),
     ));
+    keyring.set_refund_keys(content.refund_keys());
     let issuer = Arc::new(spark_issuer::Issuer::new(
         Db::new(),
         IssuerKey::generate(&mut Fixed(2)).unwrap(),

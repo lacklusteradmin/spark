@@ -91,7 +91,7 @@ fn publish(
     entry: &Entry,
     serial: &mut u8,
 ) -> (SerName, Receipt) {
-    let (name, chunk) = room::seal(root, slot, &entry.encode());
+    let (name, chunk) = room::seal(root, slot, &[7; 24], &entry.encode());
     *serial += 1;
     let (claim, tok) = token(*serial, chunk.len() as u64);
     match servers.content.handle(content::Request::Put {
@@ -144,6 +144,7 @@ fn phase_one() -> Servers {
         "members disagree on the archive root"
     );
     gens.push(Generation {
+        members: vec![],
         epoch: g1_epoch,
         root: g1_root.clone(),
         my_next: 0,
@@ -151,6 +152,7 @@ fn phase_one() -> Servers {
     deltas.push(Delta::OpenGeneration {
         room: ROOM,
         generation: Generation {
+            members: vec![],
             epoch: g1_epoch,
             root: g1_root.clone(),
             my_next: 0,
@@ -167,6 +169,8 @@ fn phase_one() -> Servers {
         let mut ob = Outbox::new(ROOM, ep, c.lane(), 0);
         let (r, d) = ob.reserve();
         let signed = Signed::new(
+            &[9; 32],
+            &clock,
             r.slot(),
             ep,
             text.as_bytes().to_vec(),
@@ -194,6 +198,7 @@ fn phase_one() -> Servers {
         "the root did not rotate"
     );
     gens.push(Generation {
+        members: vec![],
         epoch: g2_epoch,
         root: g2_root.clone(),
         my_next: 0,
@@ -201,6 +206,7 @@ fn phase_one() -> Servers {
     deltas.push(Delta::OpenGeneration {
         room: ROOM,
         generation: Generation {
+            members: vec![],
             epoch: g2_epoch,
             root: g2_root.clone(),
             my_next: 0,
@@ -213,6 +219,8 @@ fn phase_one() -> Servers {
         let mut ob = Outbox::new(ROOM, g2_epoch, c.lane(), 0);
         let (r, d) = ob.reserve();
         let signed = Signed::new(
+            &[9; 32],
+            &clock2,
             r.slot(),
             g2_epoch,
             text.as_bytes().to_vec(),
@@ -266,7 +274,9 @@ fn phase_one() -> Servers {
         assert_eq!(
             servers.keyring.handle(keyring::Request::PutSnapshot(
                 auth(&servers.keyring, &c.id),
-                snap.as_bytes().to_vec()
+                snap.as_bytes().to_vec(),
+                (None, 0),
+                vec![]
             )),
             keyring::Response::SnapshotWritten
         );
@@ -331,7 +341,7 @@ fn restore(servers: &Servers, id: &Identity) -> Vec<String> {
         .into_iter()
         .filter_map(|e| match &e.payload {
             Payload::Application(sig) => {
-                sig.verify(e.slot(), e.epoch)
+                sig.verify(&[9; 32], &e.clock, e.slot(), e.epoch)
                     .expect("authorship verifies after restore");
                 Some(String::from_utf8(sig.body.clone()).unwrap())
             }

@@ -57,32 +57,41 @@ APNs and FCM tokens are bound to real Apple and Google accounts, bridging key to
 person and leaking timing.
 """
 mitigation = """
-Partial, and only the client half. Push is its own switch, on by default with the
-leak stated; off means the platform is never asked for a token, rather than a
-token persisting while notifications are merely hidden. Wake-ups carry no payload.
+Push is off by default, which is a product decision recorded in Spark-spec.md D3.
+Off means the platform is never asked for a token, rather than a token persisting
+while notifications are merely hidden. Turning it on requires a `Consent`, whose
+only constructor takes back the exact warning text the interface displayed, so no
+interface can enable push without having shown the risk, and one still showing an
+older wording fails closed. Wake-ups carry no payload.
 """
 evidence = [
+  "crates/spark-transport/tests/push.rs::push_is_off_by_default_and_is_its_own_switch",
+  "crates/spark-transport/tests/push.rs::turning_push_on_requires_the_exact_warning",
+  "crates/spark-transport/tests/push.rs::the_warning_names_every_part_of_the_risk",
   "crates/spark-transport/tests/push.rs::off_means_the_platform_is_never_asked_for_a_token",
   "crates/spark-transport/tests/push.rs::the_wake_up_signal_carries_nothing",
-  "crates/spark-transport/tests/push.rs::push_is_on_by_default_and_is_its_own_switch",
 ]
 residual = """
-Accepted, and larger than the client-side work suggests.
+Accepted for every user who turns push on, and for them it is fully present.
 
 Delivering a push at all requires something, somewhere, to hold a mapping from an
 account to an Apple or Google token. `Spark-build-notes.md` §2 says the servers
-may never store "real-world identifiers", and a push token is one. D3 says push is
-on by default. **Both cannot hold as absolutes**, and this register is where that
-is written down rather than discovered during implementation.
+may never store a real-world identifier, and a push token is one. D3 used to say
+push was on by default; both could not hold as absolutes. That conflict is now
+resolved by decision rather than by engineering: push is off by default, so the
+mapping exists only for accounts whose owner chose it after being told the cost.
+§2 holds for everyone else, and for those who opt in the warning is the whole of
+the mitigation.
 
-No delivery service exists yet, and none should be built until this is resolved.
-The options are a fourth trust domain holding the mapping and nothing else, or
-push being opt-in rather than default, or no push. Whichever is chosen, the
-mapping is a real-world identifier held against an account, and W2 stays severe.
+No delivery service exists yet. When one is built it is a fourth trust domain
+holding a real-world identifier for each opted-in account, and nothing else. The
+interface that offers push does not exist yet either: when it does, it must route
+through `Consent::acknowledge` with the text it actually displays.
 
-Accounts with no token also form a visible group, which no mitigation removes.
+Opting in is now the distinguishing act, so accounts with a token form a visible
+group, which no mitigation removes.
 """
-stated_to_user = "crates/spark-transport/src/push.rs::Setting::warning"
+stated_to_user = "crates/spark-transport/src/push.rs::ENABLE_WARNING"
 
 # ---------------------------------------------------------------------------
 

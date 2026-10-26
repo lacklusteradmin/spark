@@ -34,6 +34,7 @@ impl Local {
         // The content service is given only the *public* halves. It cannot mint a
         // token, and so cannot forge the evidence that someone paid.
         let content = content::Content::with_keys(Db::new(), keyring.accepted_keys());
+        keyring.set_refund_keys(content.refund_keys());
         let issuer = issuer::Issuer::new(Db::new(), voucher_key);
         Self {
             keyring,
@@ -111,17 +112,28 @@ impl KeyringService for Local {
             _ => Err(ServiceError::Refused),
         }
     }
-    fn put_snapshot(&self, auth: &Auth, chunk: &[u8]) -> Result<(), ServiceError> {
-        match self
-            .keyring
-            .handle(keyring::Request::PutSnapshot(to_auth(auth), chunk.to_vec()))
-        {
+    fn put_snapshot(
+        &self,
+        auth: &Auth,
+        chunk: &[u8],
+        expected: (Option<[u8; 32]>, u32),
+        permits: &[[u8; 32]],
+    ) -> Result<(), ServiceError> {
+        match self.keyring.handle(keyring::Request::PutSnapshot(
+            to_auth(auth),
+            chunk.to_vec(),
+            expected,
+            permits.to_vec(),
+        )) {
             keyring::Response::SnapshotWritten => Ok(()),
             _ => Err(ServiceError::Refused),
         }
     }
-    fn issuer_key(&self) -> Result<Vec<u8>, ServiceError> {
-        match self.keyring.handle(keyring::Request::GetIssuerKey) {
+    fn issuer_key(&self, size_class: u8) -> Result<Vec<u8>, ServiceError> {
+        match self
+            .keyring
+            .handle(keyring::Request::GetIssuerKey(size_class))
+        {
             keyring::Response::IssuerKey(d) => Ok(d),
             _ => Err(ServiceError::Refused),
         }
@@ -141,11 +153,35 @@ impl KeyringService for Local {
             _ => Err(ServiceError::Refused),
         }
     }
-    fn put_request(&self, addr: &[u8; 32], blob: &[u8], token: &[u8]) -> Result<(), ServiceError> {
+    fn credit_refund(
+        &self,
+        auth: &Auth,
+        claim: TokenClaim,
+        token: &Token,
+    ) -> Result<(), ServiceError> {
+        match self.keyring.handle(keyring::Request::CreditRefund(
+            to_auth(auth),
+            claim,
+            token.clone(),
+        )) {
+            keyring::Response::Credited => Ok(()),
+            _ => Err(ServiceError::Refused),
+        }
+    }
+    fn set_contacts(&self, auth: &Auth, permits: &[[u8; 32]]) -> Result<(), ServiceError> {
+        match self.keyring.handle(keyring::Request::SetContacts(
+            to_auth(auth),
+            permits.to_vec(),
+        )) {
+            keyring::Response::RequestDropped => Ok(()),
+            _ => Err(ServiceError::Refused),
+        }
+    }
+    fn put_request(&self, addr: &[u8; 32], blob: &[u8], permit: &[u8]) -> Result<(), ServiceError> {
         match self.keyring.handle(keyring::Request::PutRequest {
             addr: *addr,
             blob: blob.to_vec(),
-            token: token.to_vec(),
+            permit: permit.to_vec(),
         }) {
             keyring::Response::RequestTaken => Ok(()),
             _ => Err(ServiceError::Refused),
@@ -201,15 +237,28 @@ impl ContentService for Local {
             _ => Err(ServiceError::Refused),
         }
     }
+    fn refund_key(&self, _class: Class, size_class: u8) -> Result<Vec<u8>, ServiceError> {
+        match self
+            .content
+            .handle(content::Request::GetRefundKey(size_class))
+        {
+            content::Response::RefundKey(k) => Ok(k),
+            _ => Err(ServiceError::Refused),
+        }
+    }
     fn release(
         &self,
         _class: Class,
         name: &[u8; 32],
         receipt: &[u8; 32],
+        size_class: u8,
+        blinded: &[u8],
     ) -> Result<Vec<u8>, ServiceError> {
         match self.content.handle(content::Request::Release {
             name: *name,
             receipt: *receipt,
+            size_class,
+            blinded: blinded.to_vec(),
         }) {
             content::Response::Released { voucher, .. } => Ok(voucher),
             _ => Err(ServiceError::Refused),

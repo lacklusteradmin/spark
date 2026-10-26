@@ -14,8 +14,8 @@ impl Chunk {
     /// Seal `plaintext` under `key`.
     ///
     /// The caller chooses the nonce, because the three chunk kinds choose it
-    /// differently: media and room log derive it (§3.1, §3.2), the keyring draws
-    /// it at random (§3.3). Making it a parameter keeps this crate deterministic
+    /// differently: media derives it (§3.1); room logs and keyrings draw it
+    /// at random (§3.2, §3.3). Making it a parameter keeps this crate deterministic
     /// and puts the nonce-uniqueness argument where it belongs — at the call site
     /// that can actually make it.
     pub fn seal(kind: Kind, key: &Secret<32>, nonce: &Nonce, plaintext: &[u8]) -> Self {

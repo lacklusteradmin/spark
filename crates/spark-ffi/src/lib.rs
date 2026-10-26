@@ -49,6 +49,12 @@ pub struct Config {
     pub cover_seconds: u64,
     /// `host:port` of the SOCKS5 proxy, used only when `tor` is not `"off"`.
     pub proxy: String,
+    /// The push warning this device's user accepted, exactly as shown, or empty.
+    ///
+    /// Store the text passed to `enable_push` when it succeeds, and clear it on
+    /// `disable_push`. It is checked again on every open, so a warning reworded in
+    /// a later release brings push up as `PushState::Stale` rather than on.
+    pub push_consent: String,
 }
 
 impl From<&Config> for spark_net::Config {
@@ -61,6 +67,7 @@ impl From<&Config> for spark_net::Config {
             tor: c.tor.clone(),
             cover_seconds: c.cover_seconds,
             proxy: c.proxy.clone(),
+            push_consent: c.push_consent.clone(),
         }
     }
 }
@@ -122,6 +129,47 @@ pub enum SessionError {
     /// Anything the client refused that the caller cannot act on differently.
     #[error("refused")]
     Refused,
+    /// Push was not turned on: the text passed back was not the current warning.
+    #[error("push was not turned on: show the current warning and pass back exactly what was shown")]
+    WarningNotShown,
+}
+
+/// Whether this device may use push.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, uniffi::Enum)]
+pub enum PushState {
+    /// Off, which is the default. Nothing is registered with Apple or Google.
+    Off,
+    /// On, after the user accepted the current warning.
+    On,
+    /// Off, because the user accepted a warning that has since changed. Show the
+    /// new one and ask again; never treat this as on.
+    Stale,
+}
+
+impl From<spark_net::PushState> for PushState {
+    fn from(p: spark_net::PushState) -> Self {
+        match p {
+            spark_net::PushState::Off => Self::Off,
+            spark_net::PushState::On => Self::On,
+            spark_net::PushState::Stale => Self::Stale,
+        }
+    }
+}
+
+/// The warning an interface must show before push can be turned on.
+///
+/// Display it in full and, if the user accepts, pass the same text to
+/// `Session::enable_push`. Push is off by default; this is the cost of turning it
+/// on, and it is meant to be read before the switch moves, not after.
+#[uniffi::export]
+pub fn push_warning() -> String {
+    spark_net::push_warning().to_string()
+}
+
+/// What leaving push off costs, to show alongside the warning.
+#[uniffi::export]
+pub fn push_off_cost() -> String {
+    spark_net::push_off_cost().to_string()
 }
 
 impl From<spark_net::Room> for Room {
@@ -172,8 +220,18 @@ impl From<spark_net::SessionError> for SessionError {
             E::Malformed => Self::Malformed,
             E::Unscrubbable => Self::Unscrubbable,
             E::Refused => Self::Refused,
+            E::WarningNotShown => Self::WarningNotShown,
         }
     }
+}
+
+/// An explicitly approved contact, containing public information only.
+#[derive(Clone, uniffi::Record)]
+pub struct Contact {
+    /// Local display name.
+    pub name: String,
+    /// Signing and encryption public keys (64 bytes).
+    pub identity: Vec<u8>,
 }
 
 /// An account, connected. The handle a mobile app holds.
@@ -253,6 +311,39 @@ impl Session {
         self.with(|s| s.accept(invitation, name))
     }
 
+    /// Public identity for approving this account as a contact.
+    pub fn public_identity(&self) -> FfiResult<Vec<u8>> {
+        self.with(|s| Ok(s.public_identity()))
+    }
+    /// Approved contacts, restored with the encrypted keyring.
+    pub fn contacts(&self) -> FfiResult<Vec<Contact>> {
+        self.with(|s| {
+            Ok(s.contacts()
+                .into_iter()
+                .map(|(name, identity)| Contact { name, identity })
+                .collect())
+        })
+    }
+    /// Explicitly approve an identity or confidential contact card, returning a reply card.
+    pub fn add_contact(&self, name: &str, card: &[u8]) -> FfiResult<Vec<u8>> {
+        self.with(|s| s.add_contact(name, card))
+    }
+    /// Remove a contact and revoke their inbox access.
+    pub fn remove_contact(&self, key: &[u8]) -> FfiResult<()> {
+        self.with(|s| s.remove_contact(key))
+    }
+    /// Send a note using a contact's inbox permission.
+    pub fn contact_note(&self, key: &[u8], note: &str) -> FfiResult<()> {
+        self.with(|s| s.contact_note(key, note))
+    }
+    /// Read only signed notes from approved contacts.
+    pub fn contact_inbox(&self) -> FfiResult<Vec<Note>> {
+        self.with(|s| {
+            s.contact_inbox()
+                .map(|notes| notes.into_iter().map(Into::into).collect())
+        })
+    }
+
     /// Send a message.
     pub fn send(&self, room: &[u8], body: &[u8]) -> FfiResult<()> {
         self.with(|s| s.send(room, body))
@@ -271,8 +362,32 @@ impl Session {
         self.with(|s| s.share_file(room, bytes).map(Into::into))
     }
 
+    /// Retry the exact pending upload after an interrupted send.
+    pub fn retry_pending_upload(&self) -> FfiResult<()> {
+        self.with(|s| s.retry_pending_upload())
+    }
+
     /// Fetch a shared file by its capability.
     pub fn fetch_file(&self, handle: &FileHandle) -> FfiResult<Vec<u8>> {
         self.with(|s| s.fetch_file(&handle.into()))
+    }
+
+    /// Whether this device may use push.
+    pub fn push_state(&self) -> FfiResult<PushState> {
+        self.with(|s| Ok(s.push_state().into()))
+    }
+
+    /// Turn push on. `shown` must be exactly the `push_warning()` text the
+    /// interface displayed; on success, store it as `Config::push_consent`.
+    pub fn enable_push(&self, shown: &str) -> FfiResult<()> {
+        self.with(|s| s.enable_push(shown))
+    }
+
+    /// Turn push off. Clear `Config::push_consent`.
+    pub fn disable_push(&self) -> FfiResult<()> {
+        self.with(|s| {
+            s.disable_push();
+            Ok(())
+        })
     }
 }

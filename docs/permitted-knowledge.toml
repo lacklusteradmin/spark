@@ -15,24 +15,29 @@
 [keyring_service]
 # Trust domain 1. The only service that knows an account-shaped identifier exists.
 fields = [
+  "minute", "count", # service-wide replay window high-water mark and admission counter
+  "auth_nonce", # one-use request proof, retained only for its valid time window
   "addr",              # SHA-256 derived keyring address. NOT a public key.
   "snapshot_bytes",    # opaque kind-3 chunk
   "snapshot_len",
   "delta_bytes",
   "delta_index",
   "mtime",
+  "withdrawal_response", # blind responses for exact account-bound request retries
   "quota_media_used",
   "quota_text_used",
   "quota_limit",
   "rate_window_start",
   "rate_count",
   "spent_refund_voucher",
+  "refund_account", # binds redemption retry to the same account; no receipt link
   # The contact-request tray. The service sees the *recipient* at write time,
   # which is unavoidable — a request has to be delivered somewhere — and is
   # listed as open question §9.5 in docs/protocol.md. It never sees the sender:
-  # the write carries a blind token, and the sender's identity is inside the AEAD.
+  # the write carries an opaque inbox permit; identities remain inside the signed AEAD.
   "request_index",
   "request_bytes",
+  "inbox_permits",     # bounded opaque authorization hashes, no identities; reveals permit count and repeat use
 ]
 
 [content_service]
@@ -44,7 +49,12 @@ fields = [
   "chunk_kind",
   "receipt_count",     # how many unknown parties hold it. Not who.
   "receipt_hash",
+  "refund_request_hash", # binds exact retry to one receipt
+  "refund_response", # blinded response only, never the redeemed voucher
+  "receipt_size_class", # denomination already visible at upload; binds the refund
   "spent_token_serial",
+  "upload_request_hash",
+  "upload_receipt", # exact replay returns the same capability, never increments holders
 ]
 
 [issuer_service]
@@ -65,7 +75,10 @@ fields = [
   # a KYC'd withdrawal to a payment, revealing that someone bought a voucher; the
   # voucher still hides which account redeemed it."
   "spent_payment_ref",
+  "payment_request_hash", # retry binding; not the hidden claim
+  "payment_response", # blinded signature, no redemption link
   "name_tier",
+  "transfer_nonce", # current challenge only, rotated on transfer/registration
 ]
 
 # Concepts that must never be stored, in any service, phrased as the words a

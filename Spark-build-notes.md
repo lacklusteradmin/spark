@@ -59,7 +59,7 @@ Write an automated check that fails if any other field is persisted. Run it in C
 
 ## 5. Build order
 
-Core and CLI together from commit 1 — the CLI is for scripted verification, not for users. Offline before online.
+Core and CLI together from commit 1. The CLI began as a scripted verification harness; it now also provides the first usable chat client, before mobile development. Offline before online.
 
 1. **Protocol doc, skeleton, invariant harness.** Chunk format, sync and conflict resolution, wire format, derivation path.
 2. **Identity, offline.** Seed to keypair, deterministic derivation, local key storage.
