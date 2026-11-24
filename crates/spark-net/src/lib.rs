@@ -21,7 +21,7 @@
 //!
 //! # Why the content service gets two
 //!
-//! Its requests fall on both sides of `Spark-spec.md` D2's default mode: room-log
+//! Its requests fall on both sides of `docs/SPARK-SPEC.md` D2's default mode: room-log
 //! chunks are text and go over Tor, media chunks are bulk and go direct. One
 //! connection would force a single routing decision for both, and the mixed mode
 //! could not be offered at all.
@@ -32,7 +32,7 @@
 //! before this, the routing, the SOCKS5 and the traffic classes existed and passed
 //! their own gate while the real client connected straight out — so the Tor
 //! setting was a switch that did nothing, which is the failure
-//! `Spark-build-notes.md` §1 names outright.
+//! `docs/SPARK-BUILD-NOTES.md` §1 names outright.
 
 pub mod session;
 pub use session::{
@@ -59,7 +59,7 @@ type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
 
 /// Whether this client transmits on a fixed schedule.
 ///
-/// `Spark-spec.md` F12's cover traffic, as a decision rather than a default — for
+/// `docs/SPARK-SPEC.md` F12's cover traffic, as a decision rather than a default — for
 /// the same reason `mode` is one. It costs real latency: a request waits for the
 /// next slot, which is a minute away. A client that turned that on without being
 /// asked would be a client that felt broken, and a client that could never turn it
@@ -80,7 +80,7 @@ pub enum Cover {
 }
 
 impl Cover {
-    /// `Spark-spec.md` F12: one transmission a minute.
+    /// `docs/SPARK-SPEC.md` F12: one transmission a minute.
     pub const DEFAULT: Self = Self::Every(std::time::Duration::from_secs(
         spark_transport::hysteria::INTERVAL_SECS,
     ));

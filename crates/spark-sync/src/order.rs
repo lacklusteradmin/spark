@@ -1,4 +1,4 @@
-//! The total order every client must agree on. `docs/protocol.md` §5.1.
+//! The total order every client must agree on. `docs/PROTOCOL.md` §5.1.
 //!
 //! Gate 4's "every member sees identical history" is a test over this function,
 //! and gate 6's "history matches after restore" is the same function applied to

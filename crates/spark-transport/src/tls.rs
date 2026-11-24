@@ -1,6 +1,6 @@
 //! TLS, pinned to a key rather than delegated to the WebPKI.
 //!
-//! `docs/protocol.md` §6 says WebSocket over TLS. This is the TLS, and it wraps
+//! `docs/PROTOCOL.md` §6 says WebSocket over TLS. This is the TLS, and it wraps
 //! the same `Read + Write` stream that SOCKS5 and WebSocket already compose over,
 //! so it is an addition in one place and invisible everywhere else.
 //!

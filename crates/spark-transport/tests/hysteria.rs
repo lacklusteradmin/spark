@@ -206,7 +206,7 @@ fn the_parameters_are_the_ones_d12_chose() {
 
 #[test]
 fn ios_is_documented_as_unable_rather_than_shipped_degraded() {
-    // Gate 11's second clause, and the honest answer to it. `Spark-build-notes.md`
+    // Gate 11's second clause, and the honest answer to it. `docs/SPARK-BUILD-NOTES.md`
     // §5 calls background cover traffic one of the two assumptions most likely to
     // fail and says to verify it during the mobile spike. **That spike has not
     // been run.** Until it is, iOS is treated as unable, because guessing the

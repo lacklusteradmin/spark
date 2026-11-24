@@ -1,6 +1,6 @@
 //! Reachability: invites, contact requests, and key migration.
 //!
-//! `Spark-spec.md` F5. Two ways to reach someone, and both end in a request that
+//! `docs/SPARK-SPEC.md` F5. Two ways to reach someone, and both end in a request that
 //! sits in a tray until it is accepted:
 //!
 //! * an **invite**, exchanged out of band as a link or QR code;
@@ -307,7 +307,7 @@ pub const MIGRATION_CONTEXT: &[u8] = b"spark/v1/migrate";
 
 /// A statement, signed by an old key, that a new key is its successor.
 ///
-/// `Spark-spec.md` F3 says migration "needs no new mechanism — it is F4's room
+/// `docs/SPARK-SPEC.md` F3 says migration "needs no new mechanism — it is F4's room
 /// membership used deliberately". That is true of the *mechanism*: an owner adds
 /// the new key and removes the old one. But an owner still has to know the
 /// request is genuine rather than an impostor asking to be let in, and F3 gives

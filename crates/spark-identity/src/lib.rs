@@ -5,7 +5,7 @@
 //! Below the I/O line: no network, no filesystem, no clock. Everything here is
 //! testable with no server in existence.
 //!
-//! This crate implements `docs/protocol.md` §2 and nothing else. The derivation
+//! This crate implements `docs/PROTOCOL.md` §2 and nothing else. The derivation
 //! path is the account: change a byte of an `info` string and every existing user
 //! loses their history. The constants below are therefore public, pinned by test
 //! vectors in `tests/vectors.txt`, and are not to be edited without a migration
@@ -13,7 +13,7 @@
 //!
 //! **At-rest storage is deliberately absent.** It is named in build-notes §5
 //! stage 2, but it cannot live here: a `pure` crate has no filesystem, and with
-//! no passphrase decided (`docs/protocol.md` §9.1) there is nothing to encrypt a
+//! no passphrase decided (`docs/PROTOCOL.md` §9.1) there is nothing to encrypt a
 //! stored seed *under*. That makes it a platform-keystore question, not a
 //! cryptographic one, and it lands with `spark-client`. What this crate
 //! guarantees instead is that nothing needs storing: every key is reproducible
@@ -110,7 +110,7 @@ impl Identity {
 
     /// Derive from the 64-byte BIP-39 seed.
     ///
-    /// This is `docs/protocol.md` §2 verbatim. Read the two side by side before
+    /// This is `docs/PROTOCOL.md` §2 verbatim. Read the two side by side before
     /// touching either.
     pub fn from_seed(seed: &spark_crypto::Seed) -> Self {
         let root: Prk = extract(ROOT_SALT, seed.expose());

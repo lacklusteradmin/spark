@@ -5,7 +5,7 @@
 //! Below the I/O line: no network, no filesystem, no clock. Everything here is
 //! testable with no server in existence.
 //!
-//! Two things live here, and they are the two halves of `docs/protocol.md` §5:
+//! Two things live here, and they are the two halves of `docs/PROTOCOL.md` §5:
 //!
 //! * **The total order.** Every client must compute the same history from the
 //!   same chunks, with no server ordering anything. [`total_order`] is that
@@ -39,7 +39,7 @@ use spark_chunk::{LaneId, Slot};
 ///
 /// Requests are issued **one name each**, never batched. Batching names into one
 /// request would tell the store that those names belong together, which is the
-/// correlation `docs/protocol.md` D-A exists to avoid, reintroduced one layer
+/// correlation `docs/PROTOCOL.md` D-A exists to avoid, reintroduced one layer
 /// down. The cost is request amplification proportional to room size, listed as
 /// open question §9.2.
 pub fn plan(known: &Clock, lanes: &[LaneId], probe_ahead: u64) -> Vec<Slot> {

@@ -1,11 +1,11 @@
-//! Push notifications. `Spark-spec.md` D3, and threat W2.
+//! Push notifications. `docs/SPARK-SPEC.md` D3, and threat W2.
 //!
 //! # Off by default, and loud to turn on
 //!
 //! A product decision, recorded in D3: push is **off** unless the user turns it
 //! on, and turning it on means being told the risk first. Delivering a push
 //! requires a server to hold a token tied to a real Apple or Google account,
-//! which `Spark-build-notes.md` §2 says Spark's servers may never store. Off by
+//! which `docs/SPARK-BUILD-NOTES.md` §2 says Spark's servers may never store. Off by
 //! default is how both can hold: nobody's account is bridged to their identity
 //! unless they chose it after reading what it costs.
 //!

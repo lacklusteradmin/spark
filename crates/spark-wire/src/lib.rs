@@ -1,4 +1,4 @@
-//! The wire format. `docs/protocol.md` §6.
+//! The wire format. `docs/PROTOCOL.md` §6.
 //!
 //! layer 2, zone `pure` — see `docs/layering.toml`.
 //!
@@ -39,7 +39,7 @@ use serde::{Serialize, de::DeserializeOwned};
 ///
 /// A media chunk is a whole file, so this is generous. It exists to bound what a
 /// peer can make a server allocate, which is the only reason a limit is here at
-/// all — `Spark-spec.md` F7 caps an *account* at 128 MB, and that is enforced by
+/// all — `docs/SPARK-SPEC.md` F7 caps an *account* at 128 MB, and that is enforced by
 /// quota, not by framing.
 pub const MAX_FRAME: usize = 16 << 20;
 

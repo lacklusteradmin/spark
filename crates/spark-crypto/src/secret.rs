@@ -49,7 +49,7 @@ impl<const N: usize> PartialEq for Secret<N> {
 impl<const N: usize> Eq for Secret<N> {}
 
 /// Serialization of secret material, for encoding the keyring *before* it is
-/// sealed (`docs/protocol.md` §8).
+/// sealed (`docs/PROTOCOL.md` §8).
 ///
 /// Gated behind the `serde` feature so that turning it on is a visible decision
 /// in a `Cargo.toml` diff. A `Secret` that reaches a serializer which is not

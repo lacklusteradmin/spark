@@ -242,7 +242,7 @@ fn garbage_does_not_decode_into_a_request() {
 
 #[test]
 fn the_header_is_exactly_what_the_protocol_says() {
-    // docs/protocol.md §6: `frame := req_id: u32le || opcode: u8 || payload`.
+    // docs/PROTOCOL.md §6: `frame := req_id: u32le || opcode: u8 || payload`.
     let f = Frame {
         req_id: 0x0403_0201,
         op: 0x2a,

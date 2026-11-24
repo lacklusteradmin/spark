@@ -6,6 +6,10 @@ Never run `git commit`, `git stage`, `git reset`, or any other git state-modifyi
 
 Spark is prelaunch — no existing users. When changing storage formats, DB schemas, keychain keys, or serialized structures, change them directly. Skip migration shims and backward-compat code entirely.
 
+## Docs
+
+Documentation lives in `docs/` under uppercase file names (`docs/SPARK-SPEC.md`, `docs/PROTOCOL.md`, `docs/CHANGELOG.md`). Chinese documents live in `docs/zh/`; a Chinese copy keeps the English file's name (`docs/zh/SPARK-SPEC.md`), and a Chinese-only document gets an uppercase name of its own (`docs/zh/CLI.md`). Only `README.md`, `AGENTS.md` and `CLAUDE.md` stay at the repository root. Refer to a document by its repository path, code comments included (`` `docs/SPARK-SPEC.md` F7 ``). The `.toml` registers in `docs/` are read by the invariant tests and keep their lowercase names. (The user moved the root `Spark-*.md` files into `docs/`, uppercased the names and put the Chinese copies in `docs/zh/` on 2026-11-24; new documents follow the same rule.)
+
 ## CHANGELOG
 
 `docs/CHANGELOG.md` records what changed and why, newest first, one section per commit. Every change goes under `## Uncommitted` as it is made.
@@ -15,7 +19,7 @@ Spark is prelaunch — no existing users. When changing storage formats, DB sche
 **How to write:**
 
 - **Tone:** an objective record. Don't address the reader ("you"), no chatty asides. Decisions the user has to make go in the conversation, not here.
-- **Only the changed result:** write what the changed thing is like now; where needed, one sentence in brackets for what it was before or why. No process ("first … then", "found … so", "tried …", the debugging story). No full after-picture either: that lives in the README, `Spark-spec.md`, `Spark-build-notes.md` or `docs/protocol.md`, and the entry points there in a phrase.
+- **Only the changed result:** write what the changed thing is like now; where needed, one sentence in brackets for what it was before or why. No process ("first … then", "found … so", "tried …", the debugging story). No full after-picture either: that lives in the README, `docs/SPARK-SPEC.md`, `docs/SPARK-BUILD-NOTES.md` or `docs/PROTOCOL.md`, and the entry points there in a phrase.
 - **One change, one sub-entry:** one bold short title per change, stating the result, with where it lives in brackets (file, type, function). Under it, one sub-entry per change, one or two sentences each. "One change" is something that can be matched in `git diff`: a behavior, a number or default, an interface or file that moved, whether old data still works. Many changes, many sub-entries; a change with a single point is the title line alone.
 - **No padding:** these aren't changes and don't get written: parts that didn't change (unless a reader would assume they did); per-item appearance and algorithm details (they belong in the docs or code comments); lists of functions and call sites; mechanical edits such as added fields or renames; a restatement of the title. A refactor that keeps behavior gets one line saying what was merged into what; how that was shown goes under `Measured`.
 - **Measurements:** the conclusion only, with its source (a file under `docs/`, a test).

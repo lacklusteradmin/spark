@@ -323,7 +323,7 @@ fn cmd_remote_demo(args: &[String]) -> i32 {
     let conn = |who: &str| {
         // Tor off: this demo has no proxy to reach. Said explicitly, because a
         // default that quietly does less than the setting claims is the failure
-        // `Spark-build-notes.md` §1 names.
+        // `docs/SPARK-BUILD-NOTES.md` §1 names.
         spark_net::Remote::connect_via(
             &kl.addr.to_string(),
             &cl.addr.to_string(),
@@ -402,7 +402,7 @@ fn cmd_remote_demo(args: &[String]) -> i32 {
     }
     println!(
         "\nAll of that crossed a TCP socket, inside TLS pinned to that key, as\n\
-         WebSocket binary frames in the format of docs/protocol.md §6.\n\
+         WebSocket binary frames in the format of docs/PROTOCOL.md §6.\n\
          \n\
          Tor is off here — there is no proxy to reach. The default mode routes\n\
          control and text through one and leaves media direct, which is why the\n\

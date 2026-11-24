@@ -408,7 +408,7 @@ fn the_content_store_logs_nothing_about_who() {
 
 #[test]
 fn releasing_refunds_quota_without_relinking_the_upload() {
-    // docs/protocol.md §7. If the refund voucher were cleartext it would bind
+    // docs/PROTOCOL.md §7. If the refund voucher were cleartext it would bind
     // "this upload" to "this identity" and undo the blind token that authorised
     // the upload in the first place.
     let ks = keyring::Keyring::new(

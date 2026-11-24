@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 # Audited implementations only (build-notes §1). Every entry here is a primitive
-# named in docs/protocol.md §1; adding one that is not requires a decision record.
+# named in docs/PROTOCOL.md §1; adding one that is not requires a decision record.
 #
 # No `getrandom`, deliberately. Entropy enters through a parameter, never through
 # a hidden syscall — see mnemonic::Mnemonic::from_entropy.

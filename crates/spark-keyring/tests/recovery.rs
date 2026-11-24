@@ -38,7 +38,7 @@ struct Servers {
 
 impl Servers {
     fn put(&mut self, name: ChunkName, c: Chunk) {
-        // Write-once, as the real store is (docs/protocol.md §6.2).
+        // Write-once, as the real store is (docs/PROTOCOL.md §6.2).
         assert!(
             self.content.insert(name.to_hex(), c).is_none(),
             "slot written twice"
@@ -241,7 +241,7 @@ fn everything_is_inert_without_the_seed() {
 #[test]
 fn a_guessed_sentence_cannot_be_tested_against_the_store() {
     // The reason room names are keyed rather than content-derived: files are hard
-    // to guess, sentences are not (Spark-spec.md F7). If room chunks were named
+    // to guess, sentences are not (docs/SPARK-SPEC.md F7). If room chunks were named
     // like media, this loop would find one.
     let (servers, _) = phase_one();
     for guess in MESSAGES {

@@ -1,6 +1,6 @@
 //! The 32-byte chunk header. Authenticated, never encrypted.
 //!
-//! `docs/protocol.md` §3. The header is the AAD, so `kind` and `version` cannot
+//! `docs/PROTOCOL.md` §3. The header is the AAD, so `kind` and `version` cannot
 //! be swapped under an attacker. Nothing else sits outside the AEAD: there is no
 //! room id, no sender field, no length prefix. **A chunk carries no routing
 //! information.**
@@ -15,7 +15,7 @@ pub const MAGIC: [u8; 4] = *b"SPK1";
 pub const VERSION: u8 = 1;
 
 /// What a chunk holds. The three kinds have different naming and different
-/// lifecycles; see `Spark-build-notes.md` §4.
+/// lifecycles; see `docs/SPARK-BUILD-NOTES.md` §4.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Kind {

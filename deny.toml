@@ -5,7 +5,7 @@
 # catches what enters the dependency graph at all — the place where "no features
 # outside chat" stops being a policy and becomes a build failure.
 
-# Cryptography is OpenMLS plus the audited primitives named in docs/protocol.md.
+# Cryptography is OpenMLS plus the audited primitives named in docs/PROTOCOL.md.
 # A second AEAD or a hand-rolled implementation arriving transitively is exactly
 # what build-notes §1 forbids; add it to `deny` below the moment one shows up.
 [bans]

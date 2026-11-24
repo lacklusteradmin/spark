@@ -1,5 +1,16 @@
 # Changelog
 
+## Beta Commit 12
+
+- **Documentation is in `docs/` under uppercase names, the Chinese documents in `docs/zh/`** (only `README.md`, `AGENTS.md` and `CLAUDE.md` remain at the root)
+  - `Spark-spec.md`, `Spark-build-notes.md` and `Spark-ad.md` moved from the root to `docs/SPARK-SPEC.md`, `docs/SPARK-BUILD-NOTES.md` and `docs/SPARK-AD.md`; their `-zh` copies are `docs/zh/` files of the same names.
+  - `docs/protocol.md` and `docs/security-review-2026-09-11.md` are `docs/PROTOCOL.md` and `docs/SECURITY-REVIEW-2026-09-11.md`; `docs/cli-zh.md` is `docs/zh/CLI.md`.
+  - Every reference to these files uses the new path, except earlier sections of this file, which keep the names they were written with.
+  - The gate 12 push-decision test reads the spec from `docs/SPARK-SPEC.md`.
+- **`AGENTS.md` says where documentation goes** (new "Docs" section): `docs/`, uppercase names, Chinese copies in `docs/zh/`, referred to by repository path.
+- Docs: README (document list at the top and every reference); `AGENTS.md` ("Docs", new; "How to write" paths); paths only in `docs/PROTOCOL.md` (preamble, §3.1, §5.0), `docs/SPARK-SPEC.md` (closing build note), `docs/SPARK-BUILD-NOTES.md` (preamble), their `docs/zh/` copies, and `docs/zh/CLI.md` ("构建与启动", security-review link).
+- Total: 54 .rs files changed (0 new), +104 / −104 lines; data and config files: `deny.toml`, `crates/spark-crypto/Cargo.toml`, `docs/layering.toml`, `docs/permitted-knowledge.toml`, `docs/threats.toml`, `crates/spark-identity/tests/vectors.txt` (comments and paths only); dependencies unchanged; tests: 293 → 293 (`cargo test --workspace` all passing).
+
 ## Beta Commit 11
 
 - **The compiler is no longer pinned: builds use the current stable Rust** (`rust-toolchain.toml` deleted, `rust-version` 1.94 → 1.95 in `Cargo.toml`)

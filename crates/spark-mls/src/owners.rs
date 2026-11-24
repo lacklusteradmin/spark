@@ -1,6 +1,6 @@
 //! The owner set: a flat set, carried inside the MLS group context.
 //!
-//! `Spark-spec.md` F4: "Owners are a flat set. The creator starts as one and may
+//! `docs/SPARK-SPEC.md` F4: "Owners are a flat set. The creator starts as one and may
 //! appoint others. [...] There is no hierarchy and no second role, so a 1:1 is a
 //! room where both people are owners."
 //!

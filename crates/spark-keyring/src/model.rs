@@ -1,4 +1,4 @@
-//! What a keyring holds. `docs/protocol.md` §8.
+//! What a keyring holds. `docs/PROTOCOL.md` §8.
 
 use serde::{Deserialize, Serialize};
 use spark_chunk::{ChunkName, Kind, LaneId, RoomRoot};
@@ -10,7 +10,7 @@ pub struct RoomId(pub [u8; 16]);
 /// An opaque receipt returned by the content store on upload.
 ///
 /// Returning it releases the chunk and refunds quota. **These must survive
-/// recovery**: a lost receipt strands a chunk forever (`Spark-spec.md` F7).
+/// recovery**: a lost receipt strands a chunk forever (`docs/SPARK-SPEC.md` F7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Receipt(pub [u8; 32]);
 
@@ -34,7 +34,7 @@ pub struct Generation {
     pub root: RoomRoot,
     /// The next sequence this account will *write* in its own lane.
     ///
-    /// Persisted before anything is sealed at that slot (`docs/protocol.md` §3.2).
+    /// Persisted before anything is sealed at that slot (`docs/PROTOCOL.md` §3.2).
     /// This is the *only* cursor the keyring holds, and deliberately so.
     ///
     /// There is no read cursor here. One was tried and removed: the keyring is for
@@ -96,7 +96,7 @@ impl From<SerName> for ChunkName {
 }
 
 /// Which store a receipt belongs to. Media and room chunks are freed by different
-/// mechanisms and must not be confused (`Spark-build-notes.md` §4).
+/// mechanisms and must not be confused (`docs/SPARK-BUILD-NOTES.md` §4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ChunkClass {
     /// Freed when its receipt count reaches zero.

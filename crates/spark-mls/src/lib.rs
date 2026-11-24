@@ -7,7 +7,7 @@
 //!
 //! Build-notes §3: **do not implement MLS**. This crate implements the *policy*
 //! that sits on top of it — who may add, remove, appoint, dismiss, leave, and
-//! dissolve — and nothing cryptographic. `Spark-spec.md` F4 is the whole
+//! dissolve — and nothing cryptographic. `docs/SPARK-SPEC.md` F4 is the whole
 //! specification for that policy, and it is short:
 //!
 //! * Owners are a flat set. No hierarchy, no second role.
@@ -44,7 +44,7 @@ pub const ROOT_LABEL: &str = "spark/v1/room-root";
 use spark_crypto::VerifyingKey;
 use spark_identity::Identity;
 
-/// The cipher suite, fixed by `Spark-build-notes.md` §3.
+/// The cipher suite, fixed by `docs/SPARK-BUILD-NOTES.md` §3.
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// Re-export so callers do not need a direct openmls dependency for the signer.
@@ -162,7 +162,7 @@ impl Room {
     /// it comes from the MLS exporter and they are now in the group. Earlier
     /// generations they cannot derive at all — that is MLS forward secrecy — so an
     /// existing member re-shares the past roots out of band. That re-share is the
-    /// mechanism `Spark-spec.md` F4 flags as sitting outside MLS's guarantees, and
+    /// mechanism `docs/SPARK-SPEC.md` F4 flags as sitting outside MLS's guarantees, and
     /// it is now exactly one list of 32-byte values.
     pub fn join<P: OpenMlsProvider>(provider: &P, welcome: &[u8]) -> Result<Self, RoomError> {
         let msg = MlsMessageIn::tls_deserialize_exact_bytes(welcome).map_err(|_| RoomError::Mls)?;
@@ -499,7 +499,7 @@ impl Room {
     /// Dissolve the room. The last owner only.
     ///
     /// The caller derives every chunk name from the generation roots it holds in
-    /// its keyring and has the store delete them (`Spark-spec.md` F7: room chunks
+    /// its keyring and has the store delete them (`docs/SPARK-SPEC.md` F7: room chunks
     /// are freed by deletion, media by receipt count). **Shared media is not
     /// freed** — each uploader reclaims their own space from their upload list,
     /// and the client must say so, because users will assume dissolving cleans up.

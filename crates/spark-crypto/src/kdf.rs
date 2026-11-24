@@ -2,7 +2,7 @@
 //!
 //! Spark derives every key from one seed, so the derivation path *is* the
 //! identity. Both halves are exposed separately rather than through a single
-//! convenience function, because `docs/protocol.md` §2 specifies them separately
+//! convenience function, because `docs/PROTOCOL.md` §2 specifies them separately
 //! and the two must stay auditable against that text.
 
 use crate::secret::Secret;

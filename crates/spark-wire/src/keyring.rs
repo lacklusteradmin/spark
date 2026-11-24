@@ -1,4 +1,4 @@
-//! The keyring service's protocol. `docs/protocol.md` §6.1.
+//! The keyring service's protocol. `docs/PROTOCOL.md` §6.1.
 //!
 //! The only service that knows an account-shaped identifier exists, which is why
 //! every operation here except two carries [`Auth`].

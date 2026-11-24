@@ -237,4 +237,4 @@ Jurisdiction, ceiling figure, and entity form are deferred until incorporation a
 
 ---
 
-**Build note.** This is an architectural spec. Stack choices, traps, and testable gates are in `Spark-build-notes.md`. Chunk format, sync protocol, and server API remain unspecified in both. An E2EE messenger is security-critical, so build in stages, review independently, and use audited libraries throughout.
+**Build note.** This is an architectural spec. Stack choices, traps, and testable gates are in `docs/SPARK-BUILD-NOTES.md`. Chunk format, sync protocol, and server API remain unspecified in both. An E2EE messenger is security-critical, so build in stages, review independently, and use audited libraries throughout.

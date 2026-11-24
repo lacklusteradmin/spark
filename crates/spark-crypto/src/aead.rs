@@ -1,6 +1,6 @@
 //! XChaCha20-Poly1305, the AEAD sealing every chunk.
 //!
-//! Chosen over AES-256-GCM for its 24-byte nonce: `docs/protocol.md` §3.2 derives
+//! Chosen over AES-256-GCM for its 24-byte nonce: `docs/PROTOCOL.md` §3.2 derives
 //! room chunk nonces rather than storing them, and a 96-bit nonce leaves too
 //! little room to do that without a birthday-bound argument.
 
@@ -14,7 +14,7 @@ pub const NONCE_LEN: usize = 24;
 /// Poly1305 tag length in bytes.
 pub const TAG_LEN: usize = 16;
 
-/// An AEAD nonce. Never reused under one key — see `docs/protocol.md` §3.2.
+/// An AEAD nonce. Never reused under one key — see `docs/PROTOCOL.md` §3.2.
 pub type Nonce = [u8; NONCE_LEN];
 
 /// Seal `plaintext`, authenticating `aad` alongside it.

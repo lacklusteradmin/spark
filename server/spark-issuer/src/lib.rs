@@ -9,7 +9,7 @@
 //!
 //! Two rules carry most of the weight:
 //!
-//! * **Names resolve but are not browsable** (`Spark-spec.md` F5). An exact name
+//! * **Names resolve but are not browsable** (`docs/SPARK-SPEC.md` F5). An exact name
 //!   returns a key; nothing else does. There is no prefix search, no listing, and
 //!   no count — so the namespace cannot be enumerated.
 //! * **A transfer overwrites the mapping** (build-notes §4). Appending a history
@@ -52,7 +52,7 @@ pub const T_VOUCHER: &str = "voucher_spent";
 /// Table of payments already exchanged for a voucher, keyed by reference.
 pub const T_PAYMENT: &str = "payment_spent";
 
-/// Days a lapsed name is held before it returns to sale (`Spark-spec.md` F9).
+/// Days a lapsed name is held before it returns to sale (`docs/SPARK-SPEC.md` F9).
 pub const GRACE_DAYS: u32 = 10;
 
 /// What a signed transfer covers.
@@ -186,7 +186,7 @@ fn is_sellable(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// Premium pricing scales with scarcity (`Spark-spec.md` D9): single characters
+/// Premium pricing scales with scarcity (`docs/SPARK-SPEC.md` D9): single characters
 /// highest, then two-character names, then longer. A price table rather than a
 /// design question — this is the shape of the table, not its final numbers.
 pub fn is_premium(name: &str) -> bool {
@@ -209,7 +209,7 @@ impl Issuer {
     /// A service over `db`, with its own voucher-signing key.
     ///
     /// **Its own**, not the keyring service's. They are separate trust domains
-    /// (`Spark-spec.md` D2's reasoning applied to services rather than traffic):
+    /// (`docs/SPARK-SPEC.md` D2's reasoning applied to services rather than traffic):
     /// one key shared between the service that sees money and the service that
     /// sees `hash(pubkey)` would let whoever holds it mint both, and would make
     /// the two domains one in every way that matters.

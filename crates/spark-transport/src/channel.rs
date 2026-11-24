@@ -1,6 +1,6 @@
 //! WebSocket framing over whatever stream the routing layer produced.
 //!
-//! `docs/protocol.md` §6: WebSocket over TLS, binary frames. This is the framing;
+//! `docs/PROTOCOL.md` §6: WebSocket over TLS, binary frames. This is the framing;
 //! the stream underneath it has already been through [`crate::Transport::open`],
 //! which decided whether it went direct or through Tor and, if through Tor,
 //! negotiated SOCKS5 on its own circuit.

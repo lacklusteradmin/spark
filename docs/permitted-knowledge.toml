@@ -1,6 +1,6 @@
 # What each server is allowed to persist. Deny by default.
 #
-# This is the machine-readable form of Spark-build-notes.md §2. Each server crate
+# This is the machine-readable form of docs/SPARK-BUILD-NOTES.md §2. Each server crate
 # ships a `schema.toml` declaring every field it writes to durable storage; the
 # test in crates/spark-invariants/tests/permitted_knowledge.rs asserts that
 # declaration is a subset of this file. A field that is not listed here cannot be
@@ -33,7 +33,7 @@ fields = [
   "refund_account", # binds redemption retry to the same account; no receipt link
   # The contact-request tray. The service sees the *recipient* at write time,
   # which is unavoidable — a request has to be delivered somewhere — and is
-  # listed as open question §9.5 in docs/protocol.md. It never sees the sender:
+  # listed as open question §9.5 in docs/PROTOCOL.md. It never sees the sender:
   # the write carries an opaque inbox permit; identities remain inside the signed AEAD.
   "request_index",
   "request_bytes",

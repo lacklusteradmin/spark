@@ -399,7 +399,7 @@ impl Session {
     ///
     /// The bytes returned carry every past generation root — the archive key for
     /// the room's whole history — so whatever moves them must be confidential.
-    /// `Spark-spec.md` F4 is where that being out-of-band is accounted for.
+    /// `docs/SPARK-SPEC.md` F4 is where that being out-of-band is accounted for.
     pub fn invite(&mut self, room: &[u8], key_package: &[u8]) -> Result<Vec<u8>, SessionError> {
         let inv = self
             .client

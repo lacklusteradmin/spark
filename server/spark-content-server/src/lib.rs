@@ -3,7 +3,7 @@
 //! layer 10, zone `io` — see `docs/layering.toml`.
 //!
 //! This service has **no accounts**. There is no login, no session, and no column
-//! anywhere below that could name a writer. `docs/protocol.md` §6.2: writes carry
+//! anywhere below that could name a writer. `docs/PROTOCOL.md` §6.2: writes carry
 //! a blind token, reads carry nothing at all.
 //!
 //! Three rules here are each load-bearing for something in the spec, and each is

@@ -1,6 +1,6 @@
 # Spark — Implementation Notes
 
-Read `Spark-spec.md` first. This file holds only what the spec does not: concrete stack choices, traps, and testable checks. Where the two conflict, the spec wins.
+Read `docs/SPARK-SPEC.md` first. This file holds only what the spec does not: concrete stack choices, traps, and testable checks. Where the two conflict, the spec wins.
 
 ---
 

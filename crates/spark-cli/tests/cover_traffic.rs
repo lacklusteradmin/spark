@@ -177,7 +177,7 @@ fn a_paced_connection_carries_a_real_request() {
 
 #[test]
 fn every_transmission_is_the_same_size_in_both_directions() {
-    // `Spark-spec.md` F12: every transmission is padded to a uniform size and sent
+    // `docs/SPARK-SPEC.md` F12: every transmission is padded to a uniform size and sent
     // to the same endpoint, since an observer who can spot a dummy by length or
     // destination gets the timing back for free.
     //
@@ -255,7 +255,7 @@ fn an_idle_connection_and_a_busy_one_look_the_same() {
 
 #[test]
 fn media_does_not_travel_in_the_stream() {
-    // `Spark-spec.md` D12. A one-minute cadence over a photo is not a slower photo,
+    // `docs/SPARK-SPEC.md` D12. A one-minute cadence over a photo is not a slower photo,
     // it is a photo that never arrives.
     let d = deployment();
     let (mut p, _) = connect(&d);

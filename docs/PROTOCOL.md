@@ -2,8 +2,8 @@
 
 Status: **prelaunch implementation, security revision.** The Rust wire types define the exact encoding. The bundled `serve` uses durable SQLite WAL transactions, persistent service keys, and a persistent TLS identity. Replicated/distributed deployment and malicious-server freshness guarantees remain separate concerns.
 
-Where this document conflicts with `Spark-spec.md`, the spec wins and this file is
-the bug. Where it conflicts with `Spark-build-notes.md`, the build notes win on
+Where this document conflicts with `docs/SPARK-SPEC.md`, the spec wins and this file is
+the bug. Where it conflicts with `docs/SPARK-BUILD-NOTES.md`, the build notes win on
 stack choices and this file wins on wire detail.
 
 Every constant here is deliberate. Nothing is "TBD in code": build-notes §1 says
@@ -107,7 +107,7 @@ The server rejects room writes with that bit cleared. The disjoint namespaces pr
 The read capability is the pair `(name, key)`. The store never sees `key`. Readers verify the media kind and recompute the requested name before decryption; valid AEAD alone does not authorize different content at that address.
 
 *Accepted cost, inherent to convergent encryption:* someone who already holds a
-file can confirm Spark holds it too. `Spark-spec.md` F7 accepts this ("Deduplication
+file can confirm Spark holds it too. `docs/SPARK-SPEC.md` F7 accepts this ("Deduplication
 tells the operator that a chunk has several holders"). The confirmation-of-file
 attack is the same fact from the other side; it is not a new leak.
 
@@ -226,7 +226,7 @@ therefore unreadable after a restore — by anyone, including its owner. F2 prom
 the opposite: history comes back from the seed.
 
 So the archive layer is the room chunk's own AEAD, keyed from `room_root`. This is
-what `Spark-spec.md` F4 already implies when it says an existing member "re-shares
+what `docs/SPARK-SPEC.md` F4 already implies when it says an existing member "re-shares
 the historical keys", and under decision D-A there is no separate MLS delivery
 path to lose, because members read chunks rather than receive messages. MLS
 carries membership and the owner set; its exporter derives each generation root.
@@ -237,7 +237,7 @@ deniability analysis is unchanged: a signature proves the holder of key X wrote 
 message, not who holds key X.
 
 **Cost, stated plainly.** Forward secrecy no longer protects the archive. Anyone
-holding the seed can read all history, which `Spark-spec.md` F6 already accepts
+holding the seed can read all history, which `docs/SPARK-SPEC.md` F6 already accepts
 ("Anyone with the seed, including a court that seizes it, can restore and read the
 history"). What changes is that this is now a property of the design rather than
 an incidental one — there is no epoch after which old messages become unreadable

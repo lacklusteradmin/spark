@@ -5,7 +5,7 @@
 //! Below the I/O line: no network, no filesystem, no clock. Everything here is
 //! testable with no server in existence.
 //!
-//! Implements `docs/protocol.md` §3 and §4. The two naming schemes are the point
+//! Implements `docs/PROTOCOL.md` §3 and §4. The two naming schemes are the point
 //! of the crate, and they are deliberately different:
 //!
 //! | | Media | Room log |

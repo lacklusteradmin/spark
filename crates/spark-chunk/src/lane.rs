@@ -1,6 +1,6 @@
 //! Lanes: the split that lets a room be append-only *and* have a total order.
 //!
-//! `docs/protocol.md` §4. `Spark-spec.md` F7 says simultaneous senders never
+//! `docs/PROTOCOL.md` §4. `docs/SPARK-SPEC.md` F7 says simultaneous senders never
 //! collide; F4 says simultaneous dismissals are ordered by the server. Both are
 //! true, of different lanes.
 

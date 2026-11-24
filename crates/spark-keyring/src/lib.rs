@@ -5,7 +5,7 @@
 //! Below the I/O line: no network, no filesystem, no clock. Everything here is
 //! testable with no server in existence.
 //!
-//! The keyring is the outer layer of the envelope (`Spark-spec.md` F2). Read it
+//! The keyring is the outer layer of the envelope (`docs/SPARK-SPEC.md` F2). Read it
 //! as a chain, because that chain is the whole recovery story:
 //!
 //! ```text
@@ -110,7 +110,7 @@ impl Keyring {
     /// Total bytes this account currently holds, which is what quota measures.
     ///
     /// Viewing and receiving are free, so nobody can drain an allowance by
-    /// posting a large video (`Spark-spec.md` F7).
+    /// posting a large video (`docs/SPARK-SPEC.md` F7).
     pub fn bytes_held(&self) -> u64 {
         self.uploads.iter().map(|u| u.size).sum()
     }
@@ -132,7 +132,7 @@ impl Keyring {
     /// Seal the whole keyring as a snapshot chunk.
     ///
     /// The nonce is a parameter and must be fresh: the keyring is mutable, so
-    /// unlike room chunks it cannot derive one (`docs/protocol.md` §3.3).
+    /// unlike room chunks it cannot derive one (`docs/PROTOCOL.md` §3.3).
     pub fn seal_snapshot(&self, key: &Secret<32>, nonce: &Nonce) -> Chunk {
         Chunk::seal(Kind::Keyring, key, nonce, &self.encode())
     }

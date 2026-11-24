@@ -1,4 +1,4 @@
-# The W1-W7 register from `Spark-spec.md`, "What Spark actually guarantees".
+# The W1-W7 register from `docs/SPARK-SPEC.md`, "What Spark actually guarantees".
 #
 # Gate 12: "Every W1-W7 threat has an implemented mitigation or a documented
 # accepted risk." This file is that reckoning, and
@@ -57,7 +57,7 @@ APNs and FCM tokens are bound to real Apple and Google accounts, bridging key to
 person and leaking timing.
 """
 mitigation = """
-Push is off by default, which is a product decision recorded in Spark-spec.md D3.
+Push is off by default, which is a product decision recorded in docs/SPARK-SPEC.md D3.
 Off means the platform is never asked for a token, rather than a token persisting
 while notifications are merely hidden. Turning it on requires a `Consent`, whose
 only constructor takes back the exact warning text the interface displayed, so no
@@ -75,7 +75,7 @@ residual = """
 Accepted for every user who turns push on, and for them it is fully present.
 
 Delivering a push at all requires something, somewhere, to hold a mapping from an
-account to an Apple or Google token. `Spark-build-notes.md` §2 says the servers
+account to an Apple or Google token. `docs/SPARK-BUILD-NOTES.md` §2 says the servers
 may never store a real-world identifier, and a push token is one. D3 used to say
 push was on by default; both could not hold as absolutes. That conflict is now
 resolved by decision rather than by engineering: push is off by default, so the
@@ -115,7 +115,7 @@ construction, because it is what recovery addresses. Key migration (F3) gives a
 user a new identifier, but does not undo the past: the old key still decrypts
 anything it held before leaving.
 """
-stated_to_user = "Spark-ad.md, 'What Spark asks of you'"
+stated_to_user = "docs/SPARK-AD.md, 'What Spark asks of you'"
 
 # ---------------------------------------------------------------------------
 
@@ -239,4 +239,4 @@ name is a durable public mapping from that name to a key; anyone who reuses a
 handle from elsewhere links the two themselves. Out-of-band invites travel through
 a channel Spark does not protect.
 """
-stated_to_user = "Spark-ad.md, 'What Spark asks of you'"
+stated_to_user = "docs/SPARK-AD.md, 'What Spark asks of you'"

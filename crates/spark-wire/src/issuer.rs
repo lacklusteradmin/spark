@@ -1,6 +1,6 @@
-//! The issuer's protocol. `docs/protocol.md` §6.3.
+//! The issuer's protocol. `docs/PROTOCOL.md` §6.3.
 //!
-//! **There is no listing operation, and there must not be one.** `Spark-spec.md`
+//! **There is no listing operation, and there must not be one.** `docs/SPARK-SPEC.md`
 //! F5: names resolve but are not browsable. Enumeration is prevented by the shape
 //! of this enum, not by a filter on an endpoint someone could later relax.
 

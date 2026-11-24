@@ -1,8 +1,8 @@
 //! Room log chunks: keyed naming, random nonces, append-only.
 //!
-//! `docs/protocol.md` §3.2. Content-derived names would let an outsider compute
+//! `docs/PROTOCOL.md` §3.2. Content-derived names would let an outsider compute
 //! the name of a guessed sentence and test whether it exists — files are hard to
-//! guess, sentences are not (`Spark-spec.md` F7). So room chunk names are an HMAC
+//! guess, sentences are not (`docs/SPARK-SPEC.md` F7). So room chunk names are an HMAC
 //! under a room secret, which the store cannot verify and an outsider cannot
 //! compute.
 
@@ -61,7 +61,7 @@ impl Slot {
 /// The slot's keyed address, with its high bit set for the room namespace.
 ///
 /// Computable by anyone holding `root` — which is how a member finds the next
-/// message without the server telling them anything (`docs/protocol.md` §5.2).
+/// message without the server telling them anything (`docs/PROTOCOL.md` §5.2).
 pub fn name(root: &RoomRoot, slot: Slot) -> ChunkName {
     let mut name = hmac_sha256_parts(root, &[NAME_INFO, &slot.suffix()]);
     name[0] |= 0x80;

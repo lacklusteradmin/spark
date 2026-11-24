@@ -98,7 +98,7 @@ pub trait KeyringService {
 /// The content service. No accounts, ever.
 ///
 /// Every method takes a traffic [`Class`], because this is the one service whose
-/// requests fall on both sides of `Spark-spec.md` D2's default mode: room-log
+/// requests fall on both sides of `docs/SPARK-SPEC.md` D2's default mode: room-log
 /// chunks are text and go over Tor, media chunks are bulk and go direct. A single
 /// connection here would force one routing decision for both, and the mixed mode
 /// would be impossible to offer.

@@ -1,4 +1,4 @@
-//! Cover traffic. `Spark-spec.md` F12 and D12.
+//! Cover traffic. `docs/SPARK-SPEC.md` F12 and D12.
 //!
 //! The client transmits on a fixed schedule whether or not the user is doing
 //! anything. Real messages occupy slots in place of dummies, so traffic looks the
@@ -303,7 +303,7 @@ impl Platform {
     ///
     /// # This is a claim, and it has not been verified here
     ///
-    /// `Spark-build-notes.md` §5 stage 12 lists "privacy-preserving push and
+    /// `docs/SPARK-BUILD-NOTES.md` §5 stage 12 lists "privacy-preserving push and
     /// background cover traffic" as the assumptions most likely to fail, and D12
     /// says of iOS: "Verify during the mobile spike."
     ///

@@ -1,6 +1,6 @@
 //! Serving the three services over the wire.
 //!
-//! `docs/protocol.md` §6. One thread per connection, one connection per service:
+//! `docs/PROTOCOL.md` §6. One thread per connection, one connection per service:
 //! the services are separate trust domains and separate listeners, so a
 //! deployment that runs them on one machine is a *choice* rather than something
 //! the code assumed.

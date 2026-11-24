@@ -1,4 +1,4 @@
-//! What a room-log chunk decrypts to. `docs/protocol.md` §5.
+//! What a room-log chunk decrypts to. `docs/PROTOCOL.md` §5.
 
 use crate::clock::Clock;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ pub const ENTRY_VERSION: u8 = 1;
 ///
 /// # Why an application message is not an MLS ciphertext
 ///
-/// An earlier draft of `docs/protocol.md` §5 had `Application(MlsMessageOut)`.
+/// An earlier draft of `docs/PROTOCOL.md` §5 had `Application(MlsMessageOut)`.
 /// Gate 6 showed that cannot work: MLS deletes each sender-ratchet key as it is
 /// used, and drops past-epoch secrets, because that is what forward secrecy *is*.
 /// An archive of MLS ciphertexts is therefore unreadable after a restore — by
@@ -20,14 +20,14 @@ pub const ENTRY_VERSION: u8 = 1;
 /// the seed.
 ///
 /// So the archive layer is the room chunk's own AEAD, keyed from `room_root`,
-/// which is what `Spark-spec.md` F4 already implies when it says an existing
+/// which is what `docs/SPARK-SPEC.md` F4 already implies when it says an existing
 /// member "re-shares the historical keys". Under decision D-A there is no
 /// separate MLS delivery path to lose: members read chunks. MLS carries
 /// membership and the owner set; its exporter derives each generation root.
 ///
 /// Confidentiality at rest comes from the chunk AEAD. Authorship comes from the
 /// signature below, made with the identity key that is also the MLS credential —
-/// so a message is provably from a member, and `Spark-spec.md` D8's deniability
+/// so a message is provably from a member, and `docs/SPARK-SPEC.md` D8's deniability
 /// analysis is unchanged: it proves the holder of key X wrote it, not who holds X.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Payload {

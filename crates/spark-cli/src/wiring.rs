@@ -6,7 +6,7 @@
 //! the same code paths a networked one will, against the same server logic that
 //! gate 5 audits.
 //!
-//! What is *not* here is a network. `docs/protocol.md` §6 specifies WebSocket over
+//! What is *not* here is a network. `docs/PROTOCOL.md` §6 specifies WebSocket over
 //! TLS, and `spark-transport` has the routing and the SOCKS5 but not the framing.
 //! A second implementation of this trait is the remaining work.
 

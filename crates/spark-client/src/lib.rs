@@ -10,7 +10,7 @@
 //! # What it does not do yet
 //!
 //! Talk to a network. [`Services`] is a trait, and the only implementation today
-//! is the in-process one in `spark-cli`. `docs/protocol.md` §6 specifies WebSocket
+//! is the in-process one in `spark-cli`. `docs/PROTOCOL.md` §6 specifies WebSocket
 //! over TLS, and `spark-transport` has the routing and the SOCKS5 but not the
 //! framing. Stated rather than implied, as elsewhere: this crate's logic is
 //! complete and exercised; its transport binding is the piece that is missing.
@@ -336,7 +336,7 @@ impl<S: Services> Client<S> {
     ///
     /// Room history is text and goes over Tor in the default mode; media is bulk
     /// and goes direct. This is the one place the two are told apart, so it is
-    /// worth reading next to `Spark-spec.md` D2's cost: a direct media fetch ties
+    /// worth reading next to `docs/SPARK-SPEC.md` D2's cost: a direct media fetch ties
     /// an IP to a content-derived chunk name, and therefore to identifiable
     /// content.
     fn traffic_class(c: ChunkClass) -> Class {
@@ -497,7 +497,7 @@ impl<S: Services> Client<S> {
     /// Add someone to a room, given their key package. Owners only.
     ///
     /// Returns the welcome to hand them, and the past generation roots they will
-    /// need. Those roots are the out-of-band re-share `Spark-spec.md` F4 flags as
+    /// need. Those roots are the out-of-band re-share `docs/SPARK-SPEC.md` F4 flags as
     /// sitting outside MLS's guarantees — a joiner derives the *current*
     /// generation for themselves, and can derive no earlier one.
     pub fn invite<R: CryptoRng + ?Sized>(
@@ -1070,7 +1070,7 @@ impl<S: Services> core::fmt::Debug for Client<S> {
 
 /// What an owner hands a joiner.
 ///
-/// The past generation roots are the out-of-band re-share `Spark-spec.md` F4
+/// The past generation roots are the out-of-band re-share `docs/SPARK-SPEC.md` F4
 /// flags as sitting outside MLS's guarantees. They are here, in one field, rather
 /// than spread through the protocol.
 ///
@@ -1082,7 +1082,7 @@ impl<S: Services> core::fmt::Debug for Client<S> {
 /// every past generation root, which is the archive key for the room's whole
 /// history. `Debug` redacts them for exactly that reason and continues to; a
 /// serializer cannot, because the joiner needs them. Anything that moves this blob
-/// is responsible for confidentiality, and `Spark-spec.md` F4 is where that being
+/// is responsible for confidentiality, and `docs/SPARK-SPEC.md` F4 is where that being
 /// out-of-band is accounted for.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Invitation {

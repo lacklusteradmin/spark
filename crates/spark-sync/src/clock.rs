@@ -1,4 +1,4 @@
-//! Vector clocks. `docs/protocol.md` §5.
+//! Vector clocks. `docs/PROTOCOL.md` §5.
 //!
 //! Signed causal observations used for ordering. A peer's claimed sequence is
 //! never a trusted allocation size or an unbounded discovery target.

@@ -1,4 +1,4 @@
-//! BIP-39, 24 words. The seed phrase *is* the account (`Spark-spec.md` F3).
+//! BIP-39, 24 words. The seed phrase *is* the account (`docs/SPARK-SPEC.md` F3).
 //!
 //! **Entropy arrives as a parameter, never from a syscall inside this crate.**
 //! Two reasons. This crate is `pure`, so it stays deterministic and its tests
@@ -53,7 +53,7 @@ impl Mnemonic {
 
     /// Expand to the 64-byte seed.
     ///
-    /// The passphrase is empty and not a parameter. `docs/protocol.md` §9.1 lists
+    /// The passphrase is empty and not a parameter. `docs/PROTOCOL.md` §9.1 lists
     /// adding one as open; exposing it here before that is decided would let a
     /// caller create accounts that a later, decided derivation cannot reproduce.
     pub fn to_seed(&self) -> Seed {

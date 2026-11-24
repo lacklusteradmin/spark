@@ -9,7 +9,7 @@
 use spark_invariants::*;
 use std::collections::BTreeSet;
 
-/// The threats `Spark-spec.md` names. Hardcoded, so that deleting one from the
+/// The threats `docs/SPARK-SPEC.md` names. Hardcoded, so that deleting one from the
 /// register is a failure rather than a smaller register.
 const REQUIRED: [&str; 7] = ["W1", "W2", "W3", "W4", "W5", "W6", "W7"];
 
@@ -218,7 +218,7 @@ fn the_push_decision_is_recorded_rather_than_left_to_be_rediscovered() {
 
     // And the spec it cites has to agree. A register that says "off by default"
     // over a D3 that still says "on" is the contradiction this test exists for.
-    let spec = std::fs::read_to_string(repo_root().join("Spark-spec.md")).expect("spec");
+    let spec = std::fs::read_to_string(repo_root().join("docs/SPARK-SPEC.md")).expect("spec");
     let d3 = spec
         .split("### D3.")
         .nth(1)
@@ -226,10 +226,10 @@ fn the_push_decision_is_recorded_rather_than_left_to_be_rediscovered() {
         .expect("D3");
     assert!(
         d3.contains("off by default"),
-        "Spark-spec.md D3 does not say push is off by default"
+        "docs/SPARK-SPEC.md D3 does not say push is off by default"
     );
     assert!(
         !d3.contains("Push is on by default"),
-        "Spark-spec.md D3 still says push is on by default"
+        "docs/SPARK-SPEC.md D3 still says push is on by default"
     );
 }

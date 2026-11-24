@@ -2,7 +2,7 @@
 //!
 //! Room chunk names must not be derived from content: an outsider could then
 //! compute the name of a guessed sentence and test whether it exists
-//! (`Spark-spec.md` F7). Keying the name derivation under a room secret is what
+//! (`docs/SPARK-SPEC.md` F7). Keying the name derivation under a room secret is what
 //! prevents that, so this is a naming primitive, not an authentication one.
 
 use crate::secret::Secret;

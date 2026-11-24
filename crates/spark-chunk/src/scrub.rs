@@ -1,4 +1,4 @@
-//! Metadata stripping. `Spark-build-notes.md` §1: "Strip EXIF client-side before
+//! Metadata stripping. `docs/SPARK-BUILD-NOTES.md` §1: "Strip EXIF client-side before
 //! encryption."
 //!
 //! # Why this refuses formats it does not know

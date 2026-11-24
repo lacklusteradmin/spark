@@ -1,7 +1,7 @@
 //! Convergent encryption: one file always produces one byte-identical chunk.
 //!
-//! `docs/protocol.md` §3.1. This is what makes "a photo twenty people sent costs
-//! one copy" true (`Spark-spec.md` F7) without the store ever holding a key.
+//! `docs/PROTOCOL.md` §3.1. This is what makes "a photo twenty people sent costs
+//! one copy" true (`docs/SPARK-SPEC.md` F7) without the store ever holding a key.
 
 use crate::chunk::{Chunk, ChunkError};
 use crate::header::Kind;

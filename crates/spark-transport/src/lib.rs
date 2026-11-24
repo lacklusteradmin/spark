@@ -8,15 +8,15 @@
 //!
 //! # What is here, and what is not
 //!
-//! Here: the routing policy (`Spark-spec.md` D2), SOCKS5 with per-circuit stream
+//! Here: the routing policy (`docs/SPARK-SPEC.md` D2), SOCKS5 with per-circuit stream
 //! isolation, and a ledger of every connection opened. The ledger is not
 //! diagnostics — it is how gate 9's "shows zero direct connections" is checkable
 //! at all, and it is why `Connector` is a trait rather than a call to `TcpStream`.
 //!
-//! Also here: [`hysteria`], the fixed-schedule cover traffic of `Spark-spec.md` F12.
+//! Also here: [`hysteria`], the fixed-schedule cover traffic of `docs/SPARK-SPEC.md` F12.
 //!
 //! Not here yet, and stated rather than implied: WebSocket framing and TLS.
-//! `docs/protocol.md` §6 specifies both. Gate 9 is about *where* connections go,
+//! `docs/PROTOCOL.md` §6 specifies both. Gate 9 is about *where* connections go,
 //! and that is decided before a byte of TLS is written, so this ships the routing
 //! and leaves the framing for the client stage.
 
@@ -123,7 +123,7 @@ impl<C: Connector> Transport<C> {
 
     /// Change mode.
     ///
-    /// `Spark-spec.md` D2: "Switching from off to on undoes nothing, because the
+    /// `docs/SPARK-SPEC.md` D2: "Switching from off to on undoes nothing, because the
     /// server already recorded the IP against the keyring label." The ledger is
     /// deliberately not cleared here — what already happened is what the client
     /// needs in order to say so.

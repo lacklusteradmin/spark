@@ -145,7 +145,7 @@ fn the_warning_names_every_part_of_the_risk() {
 #[test]
 fn push_is_off_by_default_and_is_its_own_switch() {
     // The product decision recorded in D3: off unless the user turns it on.
-    // `Spark-build-notes.md` §2 says servers may never store real-world
+    // `docs/SPARK-BUILD-NOTES.md` §2 says servers may never store real-world
     // identifiers and a push token is one; off by default is how that holds for
     // everyone who has not chosen otherwise.
     //

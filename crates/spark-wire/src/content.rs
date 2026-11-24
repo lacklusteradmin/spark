@@ -1,4 +1,4 @@
-//! The content service's protocol. `docs/protocol.md` §6.2.
+//! The content service's protocol. `docs/PROTOCOL.md` §6.2.
 //!
 //! **No operation here carries an identity.** Writes carry a blind token; reads
 //! carry nothing at all. That is visible from the shape of these types, which is

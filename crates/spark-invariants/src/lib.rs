@@ -1,4 +1,4 @@
-//! The invariant harness. Runs in CI from commit 1 (`Spark-build-notes.md` §2, §6).
+//! The invariant harness. Runs in CI from commit 1 (`docs/SPARK-BUILD-NOTES.md` §2, §6).
 //!
 //! Two families of rule, both deny-by-default:
 //!

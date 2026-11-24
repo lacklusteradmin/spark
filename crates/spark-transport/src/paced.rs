@@ -1,6 +1,6 @@
 //! A channel that transmits on a schedule instead of when it has something to say.
 //!
-//! `Spark-spec.md` F12 and D12. [`crate::hysteria`] is the scheduler; this is what
+//! `docs/SPARK-SPEC.md` F12 and D12. [`crate::hysteria`] is the scheduler; this is what
 //! connects it to a real connection, and without it the scheduler was a module
 //! nothing called.
 //!
@@ -58,7 +58,7 @@ impl RealTicker {
 }
 
 impl Default for RealTicker {
-    /// `Spark-spec.md` F12's interval.
+    /// `docs/SPARK-SPEC.md` F12's interval.
     fn default() -> Self {
         Self::every(std::time::Duration::from_secs(
             crate::hysteria::INTERVAL_SECS,

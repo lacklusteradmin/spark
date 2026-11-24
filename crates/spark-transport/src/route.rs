@@ -1,4 +1,4 @@
-//! Which traffic goes over Tor. `Spark-spec.md` D2.
+//! Which traffic goes over Tor. `docs/SPARK-SPEC.md` D2.
 //!
 //! The whole policy is one function over two enums, and it is deliberately that
 //! small: this is the decision an auditor most wants to be able to read in full.
@@ -23,7 +23,7 @@ pub enum Class {
     Media,
 }
 
-/// How much traffic is routed over Tor. `Spark-spec.md` D2.
+/// How much traffic is routed over Tor. `docs/SPARK-SPEC.md` D2.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Mode {
     /// Everything over Tor.

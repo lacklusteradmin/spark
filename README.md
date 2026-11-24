@@ -2,9 +2,9 @@
 
 A private, phone-number-free messenger that does one thing: chat.
 
-- `Spark-spec.md` — the design specification. **Where anything conflicts, this wins.**
-- `Spark-build-notes.md` — stack choices, traps, and the gates each stage must pass.
-- `docs/protocol.md` — chunk format, naming, lanes, sync, and the server API.
+- `docs/SPARK-SPEC.md` — the design specification. **Where anything conflicts, this wins.**
+- `docs/SPARK-BUILD-NOTES.md` — stack choices, traps, and the gates each stage must pass.
+- `docs/PROTOCOL.md` — chunk format, naming, lanes, sync, and the server API.
   Fills the gap both specs name as unspecified.
 - `docs/layering.toml` — the crate graph, enforced rather than described.
 - `docs/permitted-knowledge.toml` — what each server may persist. Deny by default.
@@ -14,14 +14,14 @@ A private, phone-number-free messenger that does one thing: chat.
 Spark now also has a usable terminal client, before mobile development. Build
 with `cargo build -p spark-cli`, then run `target/debug/spark help`.
 Commands cover saved profiles, rooms, invitations, messages, live chat, and
-attachments. See [the CLI walkthrough (中文)](docs/cli-zh.md).
+attachments. See [the CLI walkthrough (中文)](docs/zh/CLI.md).
 
 Profiles currently store the recovery phrase **unencrypted**, protected by Unix
 owner-only permissions. `serve --data-dir DIR` uses SQLite WAL transactions and
 persists its mint keys and TLS identity in a private directory (default:
 `spark-server-data`). Server restart recovery is covered by a real subprocess
 test. Remaining protocol limitations are tracked in
-[the security review](docs/security-review-2026-09-11.md).
+[the security review](docs/SECURITY-REVIEW-2026-09-11.md).
 
 ## Status
 
@@ -41,7 +41,7 @@ through a conversation with the real client, and then prints the servers' entire
 contents and shows the plaintext is not in them. `spark new` generates a recovery
 phrase and the address it derives.
 
-**There is a network now.** `spark-wire` is the format of `docs/protocol.md` §6,
+**There is a network now.** `spark-wire` is the format of `docs/PROTOCOL.md` §6,
 carried as WebSocket binary frames. `Services` has two implementations — one
 in-process, one over TCP — and `crates/spark-cli/tests/network.rs` runs the same
 client against both, because a client that works in-process and not over the wire
@@ -76,7 +76,7 @@ like everything else. The dylib's install name is `@rpath/libspark_ffi.dylib`
 otherwise ship inside the library and differ between builds. These are host
 builds: the iOS and Android targets a phone would load are not built by the gate.
 
-**Nothing here has been run on a phone.** `Spark-build-notes.md` §5 stage 12 calls
+**Nothing here has been run on a phone.** `docs/SPARK-BUILD-NOTES.md` §5 stage 12 calls
 for a mobile spike, and the two assumptions it names as most likely to fail —
 background cover traffic and privacy-preserving push — are exactly the two this
 repository answers on paper. See `docs/threats.toml`, W2 and W4. What is verified
@@ -101,7 +101,7 @@ lives in the harness, which reads `spark-identity`'s source and fails on any
 constructor that is not seed-derived — a test inside the crate could only check
 constructors it already imports.
 
-The derivation chain in `docs/protocol.md` §2 was verified against an independent
+The derivation chain in `docs/PROTOCOL.md` §2 was verified against an independent
 Python implementation of PBKDF2-HMAC-SHA512 and HKDF-SHA256, and the mnemonic
 against the official BIP-39 test vector.
 
@@ -132,7 +132,7 @@ holds, in `crates/spark-invariants/tests/gate6_recovery.rs`, which runs the whol
 stack: a real MLS room, real chunks, both real services, and then throws
 everything away except twenty-four words.
 
-**This gate changed the protocol.** See `docs/protocol.md` §5.0. The first version
+**This gate changed the protocol.** See `docs/PROTOCOL.md` §5.0. The first version
 of that test passed while the total order was reversed, because it only compared
 two restores to each other rather than to what was actually said. Fixing the
 assertion surfaced the real problem: `Payload::Application` held an MLS ciphertext,
@@ -199,7 +199,7 @@ frames, because the observable is ciphertext — a test comparing plaintext woul
 prove indistinguishability of something an observer never sees.
 
 **The backgrounding half is answered "documented as unable", for iOS.**
-`Spark-build-notes.md` §5 calls background cover traffic one of the two
+`docs/SPARK-BUILD-NOTES.md` §5 calls background cover traffic one of the two
 assumptions most likely to fail and says to verify it during the mobile spike.
 **That spike has not been run.** Until it is, iOS is treated as unable, because
 guessing the other way leaves a user believing their timing is covered when it is
@@ -215,8 +215,8 @@ threat must say what remains *after* the mitigation, and every one must point at
 where the user is told. A threat with no answer fails the gate, because there is
 deliberately no third status.
 
-**Stage 12 produced one finding, and it has been decided.** `Spark-build-notes.md`
-§2 says the servers may never store real-world identifiers. `Spark-spec.md` D3 said
+**Stage 12 produced one finding, and it has been decided.** `docs/SPARK-BUILD-NOTES.md`
+§2 says the servers may never store real-world identifiers. `docs/SPARK-SPEC.md` D3 said
 push was on by default. Delivering a push requires *something* to hold a mapping
 from an account to an Apple or Google token, and a push token is a real-world
 identifier, so both could not hold as absolutes. The decision: **push is off by
@@ -284,7 +284,7 @@ Two details separate routing over Tor from appearing to:
   refuses username/password is refused in turn rather than falling back to
   no-auth, which would mean sharing a circuit while the user was told otherwise.
 
-WebSocket framing and TLS are not here yet, and `docs/protocol.md` §6 specifies
+WebSocket framing and TLS are not here yet, and `docs/PROTOCOL.md` §6 specifies
 both. Gate 9 is about *where* connections go, which is decided before a byte of
 TLS is written.
 
@@ -495,7 +495,7 @@ constant-time, so an attacker who can time private-key operations over the netwo
 may recover the key. Spark performs that operation on two servers: the keyring
 service blind-signs storage tokens, and the issuer blind-signs name vouchers.
 Recovering either key means minting them for free, which removes the economic
-floor `Spark-spec.md` D1 depends on. The advisory still reads `patched = []`, and
+floor `docs/SPARK-SPEC.md` D1 depends on. The advisory still reads `patched = []`, and
 names exactly one workaround: *avoid using the crate where attackers can observe
 timing.* Two of our servers did precisely that, on input the attacker chose.
 
@@ -509,7 +509,7 @@ for every lookup. No secret-dependent branch and no secret-dependent memory inde
 `crypto-bigint` is not an outside bet — it is already in the graph because `rsa`
 depends on it, and migrating to it is how RustCrypto intends to fix this advisory.
 
-**Why this is not the custom cryptography `Spark-build-notes.md` §1 forbids.** An
+**Why this is not the custom cryptography `docs/SPARK-BUILD-NOTES.md` §1 forbids.** An
 earlier version of this section rejected "build RFC 9474 on a constant-time RSA",
 and that rejection stands: the scheme is subtle and reimplementing it would trade
 one timing bug for a class of protocol bugs. This is a much smaller thing.
@@ -590,5 +590,5 @@ proves nothing.
 
 ## Build order
 
-Stages 2 onward are in `Spark-build-notes.md` §5. Offline before online: stages
+Stages 2 onward are in `docs/SPARK-BUILD-NOTES.md` §5. Offline before online: stages
 2 through 4 run entirely against `pure` crates, with no server in existence.

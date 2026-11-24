@@ -40,7 +40,7 @@ pub const MAX_PENDING: usize = 64;
 
 /// Deltas allowed before the client is expected to write a snapshot.
 pub const COMPACT_AFTER: u32 = 64;
-/// The earned-quota minimum an unpaid key holds (`Spark-spec.md` D1).
+/// The earned-quota minimum an unpaid key holds (`docs/SPARK-SPEC.md` D1).
 pub const FREE_QUOTA: u64 = 1 << 20;
 
 /// A request to the keyring service. Every variant is authenticated.

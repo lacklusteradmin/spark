@@ -39,7 +39,7 @@ name  = "spark-wire"
 layer = 2
 zone  = "pure"
 deps  = ["spark-crypto"]
-role  = "the wire format of docs/protocol.md §6. Pure, so every property of the encoding is checkable without a socket. Deliberately not the servers' own request types: a server's Request is its implementation, this is the protocol, and keeping them apart means a change to either shows up as a change to the conversion between them."
+role  = "the wire format of docs/PROTOCOL.md §6. Pure, so every property of the encoding is checkable without a socket. Deliberately not the servers' own request types: a server's Request is its implementation, this is the protocol, and keeping them apart means a change to either shows up as a change to the conversion between them."
 
 [[crate]]
 name  = "spark-mls"

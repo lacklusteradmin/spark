@@ -1,6 +1,6 @@
 //! RFC 9474 blind RSA signatures, over an audited implementation.
 //!
-//! One primitive serves two jobs (`Spark-build-notes.md` §3): storage tokens and
+//! One primitive serves two jobs (`docs/SPARK-BUILD-NOTES.md` §3): storage tokens and
 //! payment vouchers. Both need the same shape — a server signs something it
 //! cannot read, and later verifies the result without being able to link it to
 //! the signing.
@@ -421,14 +421,14 @@ impl TokenClaim {
 
 /// What a voucher entitles its holder to.
 ///
-/// The same primitive as a storage token, a different claim. `Spark-build-notes.md`
+/// The same primitive as a storage token, a different claim. `docs/SPARK-BUILD-NOTES.md`
 /// §3: "One primitive serves storage tokens and payment vouchers."
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Grant {
     /// Months of a name, at a tier.
     ///
-    /// Two tiers because the fee has two jobs that pull apart (`Spark-spec.md` D1):
+    /// Two tiers because the fee has two jobs that pull apart (`docs/SPARK-SPEC.md` D1):
     /// basic names are near-free so that blind tokens hide people in a crowd, and
     /// premium names carry a real price and fund the service. Both unlock full
     /// quota, so the paywall gates desirability rather than entry.
@@ -474,7 +474,7 @@ impl VoucherClaim {
     /// What the issuer must be paid for this grant, in whatever unit the price
     /// table uses.
     ///
-    /// `Spark-spec.md` D9: "Premium pricing scales with scarcity [...] a price
+    /// `docs/SPARK-SPEC.md` D9: "Premium pricing scales with scarcity [...] a price
     /// table rather than a design question." This is the table, kept here so the
     /// buyer and the issuer compute the same number from the same code.
     pub fn price(&self) -> u64 {

@@ -1,7 +1,7 @@
 //! The client over a real socket.
 //!
 //! Same client, same server logic, a TCP connection and the wire format of
-//! `docs/protocol.md` §6 in between. The point is that it behaves identically:
+//! `docs/PROTOCOL.md` §6 in between. The point is that it behaves identically:
 //! if the client works in-process and not over the wire, one of the two is wrong,
 //! and every earlier gate was testing the wrong one.
 
@@ -88,7 +88,7 @@ impl Deployment {
     ///
     /// Explicit, because the *default* is `TextOverTor` and there is no Tor here.
     /// Defaulting these tests to "off" inside the client would be the failure
-    /// `Spark-build-notes.md` §1 names: a privacy setting that quietly does less
+    /// `docs/SPARK-BUILD-NOTES.md` §1 names: a privacy setting that quietly does less
     /// than it says. Better that the test states what it is not using.
     fn connect(&self) -> std::io::Result<Remote> {
         self.connect_with(&[self.pin])

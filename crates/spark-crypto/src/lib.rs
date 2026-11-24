@@ -10,7 +10,7 @@
 //! type discipline that keeps key material from leaking through `Debug`, `==`,
 //! or a forgotten `drop`.
 //!
-//! Every primitive named in `docs/protocol.md` §1 is now here.
+//! Every primitive named in `docs/PROTOCOL.md` §1 is now here.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
