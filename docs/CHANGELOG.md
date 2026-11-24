@@ -1,0 +1,455 @@
+# Changelog
+
+## Beta Commit 11
+
+- **The compiler is no longer pinned: builds use the current stable Rust** (`rust-toolchain.toml` deleted, `rust-version` 1.94 → 1.95 in `Cargo.toml`)
+  - The CI jobs that install a toolchain install `stable` (was 1.94.1), and the `cross-machine` job builds in `rust:slim-bookworm` (was `rust:1.94.1-slim-bookworm`), so both replicas use the stable rustc the image carries when the run starts.
+  - A byte-identical rebuild of a binary needs the rustc that built it (was "pin compiler and dependency versions").
+- **The FFI library is in the reproducibility check** (`scripts/repro-manifest.sh`; `crates/spark-ffi/build.rs`, new)
+  - `libspark_ffi.a` and `libspark_ffi.dylib` (`.so` on Linux) are compared (the dylib was excluded along with the proc-macro dylibs and the static archive was never hashed, though the README said both were byte-identical).
+  - The dylib's install name is `@rpath/libspark_ffi.dylib` (was its absolute output path in the builder's target directory, which shipped inside the library and made two builds differ by 291 bytes).
+- **The reproducibility check reads cargo's per-unit build layout** (`scripts/repro-manifest.sh`): dependency outputs under `build/<package>/<hash>/out/` are compared as well as those in `deps/` (current cargo puts them there, so with the old `-maxdepth 2` the unpinned compiler's builds would have compared only the 18 top-level artifacts).
+- **One script decides what counts as an artifact and how it is hashed** (`scripts/repro-manifest.sh`, new): `verify-reproducible.sh` and the CI `cross-machine` job both call it (each had its own `find`).
+- **`AGENTS.md` and `CLAUDE.md` are in the repository** (`.gitignore` listed both): `AGENTS.md` holds the git rule, the prelaunch no-migration rule and the rules for this file, and `CLAUDE.md` points to it.
+- **The terminal client compiles again** (`spark-cli` `terminal.rs`) (Beta Commit 10 added `Config::push_consent` and `SessionError::WarningNotShown` to `spark-net` and `spark-ffi` without updating the CLI, so `spark-cli` and its tests did not build)
+  - `Profile::config` leaves `push_consent` empty: the terminal client has no push command, so push stays off.
+  - `WarningNotShown` reads "push was not turned on: show the current warning and pass back exactly what was shown".
+  - The test deployments in `tests/ffi.rs` and `tests/terminal.rs` leave `push_consent` empty too.
+- **Docs and help text match what the code does** (`docs/cli-zh.md`, `terminal::usage`, `spark-identity` crate doc)
+  - `docs/cli-zh.md` and `spark help` say `serve` keeps data, keys and the TLS pin in `--data-dir` across restarts (they still said memory only, though Beta Commit 10 made it durable); the walkthrough's test scope names the `durable_server` test and no longer lists server persistence as missing.
+  - The `spark-identity` crate doc names `tests/vectors.txt` (was `vectors.json`).
+- **Code follows the newer toolchain, behavior unchanged** (`spark-mls`, `spark-client`, `spark-cli`, `spark-keyring-server`, `spark-ffi`): nested `if let`s became let-chains, `chunks_exact` became `as_chunks`, the deprecated `fetch_update` became `try_update`, the client's scan map got named key and cursor types, one needless borrow went, and rustfmt rewrapped one `#[error]` attribute.
+- Measured:
+  - 2026-11-24, rustc 1.100.0 stable on macOS: a snapshot of Beta Commit 10 fails `cargo check --workspace --all-targets` (E0063, E0004 in `spark-cli`); the working tree passes `cargo test --workspace` (293 passed, 0 failed), `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`.
+  - 2026-11-24, `scripts/verify-reproducible.sh`, rustc 1.100.0 on macOS, two fresh builds: 265 artifacts identical, both FFI libraries among them (the README's 251 was with rustc 1.94.1 and the flat `deps/` layout; the old selection finds 18 in the new layout); `libspark_ffi.dylib` differed in 291 bytes before the `@rpath/` install name and in none after. The Linux `.so` is compared only by CI, which has not run on this change.
+- Docs: README quick-start count, "Setup" and the FFI paragraph of "Status"; `Spark-spec.md` D4 and `Spark-build-notes.md` §3 "Stack", with their `-zh` twins; `docs/cli-zh.md` "构建与启动" and "验证范围"; `AGENTS.md` and `CLAUDE.md` (new to the repository); new `docs/CHANGELOG.md`, backfilled from Initial Commit.
+- Total: 12 .rs files changed (1 new), +58 / −30 lines; data and config files: `rust-toolchain.toml` (deleted), `scripts/repro-manifest.sh` (new), `scripts/verify-reproducible.sh`, `.github/workflows/ci.yml`, `.gitignore`, `Cargo.toml` (`rust-version`), `scripts/build-repro.sh` (comments only); dependencies unchanged; tests: `spark-cli` did not compile → 293 (`cargo test --workspace` all passing).
+
+## Beta Commit 10
+
+- **Servers store their data in SQLite, and each request commits before it is answered** (`spark-store` `Db`, `Transaction`; `handle` in the keyring, content and issuer services) (`docs/security-review-2026-09-11.md`: further fixes)
+  - `Db` is a SQLite database in WAL mode with `synchronous=FULL` (was an in-memory map); `Db::new()` is an in-memory SQLite fixture, `Db::open()` the durable file.
+  - Each request runs in one `BEGIN IMMEDIATE` transaction under a per-service lock, so authorization spends, accounting and stored retry responses commit together; a request that does not finish rolls back.
+  - `Db::open` refuses a symlink, a non-regular file, or a database or parent directory with group/other permission bits, and creates the file 0600.
+  - Per-account reads of deltas and contact requests are indexed key-range queries (were a scan of every key in the table).
+- **`serve` keeps its data, keys and TLS pin across restarts** (`spark-cli` `cmd_serve`, `certs::persistent`; `spark-store::mint::Mint::persisted`)
+  - `serve --data-dir DIR` (default `spark-server-data`) keeps one SQLite file per service plus `tls.sqlite` in a directory that must be 0700 and not a symlink; an OS lock on `server.lock` refuses a second process on the same directory.
+  - A `vault` table, outside the field inventory gate 5 audits, holds every storage and refund denomination key, the issuer's price keys with rotation state, the challenge secret and the TLS certificate and key (keys and TLS identity were generated at each start, so the pin changed on every restart).
+  - The keyring challenge secret is random (was the constant `[0x5e; 32]`) and its clock is the real server minute (security review: production auth clock fixed at 1 by `set_minute(1)`).
+- **Keyring requests are signed in full, and each proof works once** (`spark-keyring-server` `handle_wire`; `spark-wire` `Auth`, `Req::signing_bytes`; `spark-net` `Remote::authorized`) (security review: further fixes)
+  - The Ed25519 signature covers `spark/v2/keyring-request` and the whole encoded request, including the minute challenge and a random 32-byte nonce (was a signature over the challenge alone, which could be attached to any operation on that account for the rest of the minute).
+  - Spent nonces are kept until their minute expires, so a replay on another connection, concurrently or after restart is refused; the client fetches a fresh challenge for every authenticated call.
+  - A persisted minute high-water mark refuses requests after the clock moves backward, and at most 65,536 authenticated requests are admitted per minute service-wide, refused before any change.
+  - `handle` keeps only the challenge-signature check and is the in-process interface; network listeners go through `handle_wire`.
+- **Storage tokens have one signing key per size class and random serials** (`spark-store::mint`; keyring `GetIssuerKey`, `WithdrawTokens`; content `Put`; `Client::upload`)
+  - Each class 10–40 has its own key, and the content service verifies a token only under the claimed class's keys (was one key for every class, so a token charged at 1 KiB could carry a hidden claim for a larger class).
+  - A withdrawal takes 1–64 blinded messages of 256 bytes and debits quota only after all are signed, so a malformed batch costs nothing; an exact retry from the same account returns the stored signatures without a second debit (security review: lost upload/refund responses).
+  - Token serials are 32 random bytes (were a per-process `u8` counter followed by the first 8 bytes of the keyring address, which the content service saw at spend).
+- **Uploads are journaled and can be finished after a crash or seed recovery** (`Client::retry_pending_upload`; `spark-keyring::model::PendingUpload`; content `Put`) (security review: lost upload/refund responses)
+  - Before withdrawing, the client saves the ciphertext, claim, pinned key and unblinding state in the encrypted keyring; `retry_pending_upload` completes that exact upload, and new sends are refused with `PendingUpload` until it does.
+  - The content service answers an exact retry (same token, name and ciphertext) with the original receipt, without charging or counting another holder.
+  - Exposed as `Session::retry_pending_upload`, the FFI method of the same name and CLI `retry-upload PROFILE`.
+- **Refunds are blind signatures from a separate refund mint** (content `Release`, `GetRefundKey`; keyring `CreditRefund`; `Client::release_upload`) (security review: refund replay; lost upload/refund responses)
+  - The content service blind-signs a refund claim (own `spark/v1/refund` domain) with a per-class refund key, only at the class the receipt was charged; the keyring service holds only those public keys and credits the claimed class's size (`Release` returned a counter value, and `CreditRefund` credited any amount the caller named for any unseen bytes).
+  - A release retried with the same blinded request returns the stored signature and a different one is refused; a redeemed refund retried by the same account succeeds without a second credit, and from another account is refused.
+  - `Client::release_upload` saves the claim and unblinding state in the keyring before releasing, so a lost response can be finished after seed recovery; it is not exposed in `Session`, FFI or CLI.
+- **Receipts are random and one per upload; deleting a room chunk needs one** (content `Put`, `Delete`; `spark-keyring` `Delta::AddUpload`, `Delta::ReleaseUpload`) (security review: duplicate upload losing the first receipt; receipts unrefundable after deletion)
+  - Receipts are 32 OS-random bytes, stored as their SHA-256 with the charged class (were a guessable counter stored as-is).
+  - The keyring tracks uploads by receipt (was by chunk name, so uploading the same file twice dropped the first receipt); a release frees one receipt.
+  - `Delete` requires a receipt issued for that room chunk (was the name alone); spec F4 and F7 now say dissolving deletes only chunks whose write receipts were delegated.
+  - Deleting empties the ciphertext but keeps the receipt count, so outstanding receipts still refund and the row goes with the last one (the receipts were deleted with it).
+- **Media and room chunks have disjoint addresses, and a fetched file must match its address** (`spark-chunk` `media::name_of`, `room::name`; content `Put`; `Client::fetch_file`) (security review: substitute media; room chunks at media addresses)
+  - Media names are SHA-256 of the chunk with the top bit cleared and room names have it set; `Put` refuses room chunks without the bit, and keyring chunks.
+  - `fetch_file` checks that the chunk is media and hashes to the requested name before decrypting (anyone holding the file key could serve another valid ciphertext in its place).
+- **Room log chunks are sealed with a random nonce** (`spark-chunk::room::seal`, `Client::send`) (was derived from `(lane, seq)`, reusing the keystream whenever a stale or restored client wrote a different message to the same slot)
+- **Room entries are authenticated before they enter history** (`spark-sync::Signed`; `Client::fetch_entry`, `Client::sync`; `spark-keyring::model::Generation::members`)
+  - The signature also covers a hash of the MLS group ID and generation root, and the entry's vector clock; the slot's lane must be the signer's message lane.
+  - Each generation keeps its member roster in the keyring, carried in invitations; entries with a wrong epoch, a non-member signer or clock lanes outside the roster are dropped before ordering (were dropped only when building the displayed messages, after ordering).
+  - Lanes are scanned from each generation's own roster (was the current MLS members for every generation), and a joiner derives its current generation from MLS rather than taking it from the invitation.
+- **Sync gets past long gaps and bad entries** (`Client::sync`) (security review: long gaps; malicious ciphertext aborting sync)
+  - Each lane keeps an in-memory cursor: up to 256 forward requests per call, stopping after `probe_ahead` (clamped to 1–256) consecutive misses and resuming there next call (was restarting from the last held entry, so a gap longer than `probe_ahead` hid everything after it).
+  - A separate sweep revisits up to 256 earlier missing slots per call, so temporarily withheld entries are found later.
+  - An entry that fails to decrypt, decode or verify counts as a miss instead of aborting the sync; network errors still return.
+- **Ordering runs in O((N+C) log N)** (`spark-sync::order`) (security review: quadratic multi-lane ordering): edges are each lane's chain plus one per other-lane clock observation, and a claimed cycle breaks at the lowest remaining `(lane, seq)` (was a comparison of every pair).
+- **Keyring writes are compare-and-swap, and restore fails loudly** (keyring `PutSnapshot`; `Client::save_keyring`, `load_keyring`, `load_mls`) (security review: stale devices overwriting newer state; restore dropping bad delta or MLS state)
+  - `PutSnapshot` carries the expected snapshot hash and delta count; a stale writer is refused and must reopen, while an exact resend of the current snapshot is acknowledged.
+  - The client resends an unacknowledged snapshot byte-for-byte before writing a newer one.
+  - Restore refuses deltas without a snapshot, a snapshot replaced between its two reads, an undecodable delta and a room whose MLS state is missing (each was skipped or read as empty).
+- **Name issuer: payments fail closed, one key per price, server clock, nonce-bound transfers** (`spark-issuer` `Issuer`, `PaymentVerifier`) (security review: forged payment references; cheap signature for an expensive grant; forged dates; transfer replay and concurrent registration; lost payment response)
+  - `Purchase` signs only when a configured `PaymentVerifier` accepts the payment, amount and blinded request; the default refuses all and consumes nothing (was any unused reference).
+  - Each price has its own signing key, provisioned out of band (`provision_price`) and persisted, and redemption verifies under the key for the claim's price (was one key for all prices, so a 5-unit purchase could carry a premium grant).
+  - Expiry and grace use the server's day clock and ignore the request's `today`; zero-month grants and date overflow are refused before the voucher is spent.
+  - Each registration and transfer stores a fresh random `transfer_nonce` that the transfer signature covers (new `TransferChallenge` op), and transfers need a live name, so an A→B→A replay fails.
+  - An exact purchase retry returns the stored blind signature; storage vouchers outside classes 20–40 price at 0 and match no key (was an unchecked shift).
+- **Connections are bounded in number, time and size** (`spark-cli::serve`; `spark-transport::Channel`) (security review: idle and slow-drip connections)
+  - Each listener serves at most 128 connections at once.
+  - A connection gets 15 seconds for the TLS and WebSocket handshake, then 90 seconds per frame, an absolute deadline that small reads do not extend (there was no timeout).
+  - WebSocket frames and messages are capped at `MAX_FRAME` (16 MiB) on both ends.
+- **MLS changes are authorized on receipt** (`spark-mls` `Room::process`, `validate_proposal`, `validate_leaf`)
+  - Commits must come from a current owner, and every proposal is checked before it is stored or merged: adds and owner-set changes by owners only, removals by owners or of oneself, updates keeping the same identity; the resulting owner set must be nonempty and within the members (was merging whatever OpenMLS accepted).
+  - A leaf's credential must equal its signature key and identities must be unique; `add` refuses a key package for an existing member, and other proposal types and extensions are refused.
+  - Removing an owner and shrinking the owner set happen in one commit (were two).
+  - Owner sets must be encoded sorted, without duplicates, with valid keys.
+- **Contacts replace open contact requests** (`spark-client` `add_contact`, `contact_note`, `contact_inbox`; keyring `PutRequest`, `inbox_gate`; `spark-identity::reach`; spec F5)
+  - Up to 64 approved contacts (name, identity, a random permit for them to write to this inbox, their permit for theirs) live in the encrypted keyring; a 96-byte contact card carries identity and permit.
+  - The keyring service holds only permit hashes, replaced with each snapshot; a request needs a listed permit and a body of at most 16 KiB, one note stays pending per permit, and changing the list clears the tray (the "blind token" was never verified, so any unused bytes delivered a request).
+  - Requests are signed by the sender inside the AEAD; the inbox shows a note only when the signature verifies and the sender is the contact holding that permit.
+  - Exposed through `Session`, FFI and CLI (`docs/cli-zh.md`).
+- **Push is off by default and turns on only with the exact warning** (`spark-transport::push` `Setting`, `Consent`; `Session::enable_push`, `push_state`; FFI) (resolves the Stage 12 finding; spec D3 reversed)
+  - `Setting::default()` is `Off`; `Setting::On` needs a `Consent`, whose only constructor accepts exactly `ENABLE_WARNING`.
+  - `Config::push_consent` holds the accepted text and is rechecked on each open; a reworded warning yields `PushState::Stale`, never on. Nothing registers yet, as there is no delivery service.
+  - W2 in `docs/threats.toml` records the decision, and gate 12 also checks that spec D3 says off by default.
+  - `spark-cli` was not updated for `Config::push_consent` and `SessionError::WarningNotShown`, so `spark-cli` and its tests do not compile at this commit (fixed in the next one).
+- **The CLI is also a terminal chat client** (`spark-cli::terminal`; `docs/cli-zh.md`)
+  - Profile commands cover accounts, rooms, invitations, messages, live chat, attachments and contacts; the diagnostic commands remain.
+  - A profile directory (0700) holds `profile.json` (0600) with the recovery phrase unencrypted, and each command takes an OS lock on it.
+  - `key-package` saves the private join state first (`Client::saved_key_package`), so a later process can accept the invitation.
+  - Room names and messages are printed with control characters escaped.
+- Measured (`docs/security-review-2026-09-11.md`):
+  - 2026-09-11, whole workspace with locked dependencies: 289 tests passed.
+  - 2026-09-11, after the parent-directory check and indexed range reads, the affected store, keyring, invariants and CLI suites: 155 passed.
+- Tests added: 52
+  - security invariants (12): forged or upgraded storage and refund tokens, refund replay, deletion without a receipt, unapproved contact permits and forged senders, transplanted archive signatures, keystream reuse, room chunks at media addresses, double-debited withdrawals
+  - name issuer (8): unverified payments, cheap price keys, forged and overflowing dates, transfer replay, concurrent registration, lost purchase responses, storage price overflow
+  - client end to end (8): contact approval and revocation, refunds, stale-device overwrites, duplicate-upload receipts, lost upload and refund responses, long gaps, media at the wrong address
+  - keyring request auth (5): tampered requests, nonce and concurrent replay, clock rollback, replay after restart
+  - SQLite store (6): lost commits, double spends across connections, unstable secrets, exposed files and directories, cross-account range reads
+  - CLI subprocesses (4): cross-process join, send, restore and share; live chat and profile locking; profile permissions; server kill and restart
+  - MLS rooms (3): non-owner changes through raw OpenMLS, key packages claiming another identity
+  - ordering (2): large interleaved histories and extreme clocks, longer cycles
+  - push (2): enabling without the exact warning, an incomplete warning
+  - serve deadlines (2): slow-drip reads, frame budget below the cover interval
+- Docs: new `docs/security-review-2026-09-11.md` (fixes with their tests, deployment conditions, unresolved limits) and `docs/cli-zh.md` (CLI walkthrough); README (new "Terminal client"; "Status" test-count line and Stage 12 push paragraph; "Push" gains "Off by default, and loud to turn on"; keyring row in "The three services"); `Spark-spec.md` and `Spark-spec-zh.md` (F4 dissolve, F5 rewritten as contacts-only, F7 receipts, W2, D3); `Spark-build-notes.md` and `Spark-build-notes-zh.md` (§5, CLI role); `docs/protocol.md` (status line, §1, §3.1–3.2, §4, §5–5.2, §6.1–6.3, §7 rewritten as "Storage authorization, deletion and blind refunds", §8, §9.5).
+- Total: 63 .rs files changed (7 new), +6000 / −853 lines; data and config files: `docs/layering.toml`, `docs/permitted-knowledge.toml`, `docs/threats.toml`, `server/content-schema.toml`, `server/issuer-schema.toml`, `server/keyring-schema.toml`; dependencies: added `rusqlite` 0.32 with bundled SQLite (`spark-store`; brings in `libsqlite3-sys` and 7 more packages); tests: 233 → 285 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 9
+
+- **New crate `spark-net` holds the networked client** (`crates/spark-net`, layer 6, `io`) (`Remote` lived in `spark-cli`, a binary with no lib target that links all three servers, so no other client could depend on it)
+  - `Remote` and `Cover` moved from `spark-cli/src/remote.rs` without behavior change; `spark-cli` and its network tests import them from `spark-net`.
+- **`spark_net::Session`: the client behind an API of strings, bytes and integers** (`spark-net/src/session.rs`)
+  - Wraps `Client<Remote>` so a caller handles none of `Mnemonic`, `Addr`, `ChunkName`, `Secret<32>`, `RoomId` or an RNG, the types `docs/layering.toml` bans from the `boundary` zone.
+  - Draws OS entropy itself through `getrandom` and panics if the OS cannot supply it.
+  - `Config` takes Tor as `"off"` / `"text"` / `"on"` and cover traffic as seconds (0 = off); an unknown mode, a malformed pin or a proxy address without a port (required even with Tor off) is `BadConfig` before anything connects.
+  - Invitations cross as postcard bytes (`Invitation` gains serde derives); the bytes carry every past generation root, so they are secret.
+- **`spark-ffi` implemented as UniFFI bindings over `Session`** (`spark-ffi/src/lib.rs`, layer 7, `boundary`; was a placeholder constant)
+  - Exports a `Session` object with mirrored `Config`, `Note`, `Room` and `FileHandle` records and a flat seven-case `SessionError`; every method forwards, and a poisoned lock returns `Refused` instead of panicking across the boundary.
+  - Builds as `cdylib`, `staticlib` and `lib`, and depends only on `spark-net`, `uniffi` and `thiserror`.
+  - Not in the reproducibility comparison: `scripts/verify-reproducible.sh` is unchanged, skips `*.dylib` by name and hashes only executables and `.rlib`s, so neither `libspark_ffi.dylib` nor `libspark_ffi.a` is compared.
+- Measured:
+  - 2026-09-02, `scripts/verify-reproducible.sh` (README quick-start figure): 251 artifacts identical across two builds (193 before).
+  - 2026-09-02, `uniffi-bindgen` on the built library, run by hand (no script in the repository): Swift bindings generate and compile with `swiftc`; no app, device or background execution tested.
+- Tests added: 3
+  - FFI against a loopback deployment (3): a foreign caller unable to hold a conversation through `spark_ffi::Session`, malformed input panicking instead of being refused, a bad configuration reaching the network.
+- Docs: `README.md` Status ("no stubs left"; new paragraph on the FFI and the two blockers it removed; what was and was not verified for mobile) and quick-start counts.
+- Total: 7 .rs files changed (2 new), +845 / −18 lines; data and config files: `docs/layering.toml`; dependencies: added `uniffi` 0.29 and `thiserror` 2 (`spark-ffi`); tests: 230 → 233 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 8
+
+- **Every client connection goes through the routing layer** (`spark-cli` `remote::Remote::connect_via`, `spark-transport::TcpConnector`) (the routing, SOCKS5 and traffic classes passed gate 9 while the real client called `TcpStream::connect`, so the Tor setting did nothing)
+  - Each connection is opened by `Transport::open` for its traffic class (keyring and issuer as `Control`) and TLS wraps the result; `Remote::ledger()` exposes every connection and whether it went over Tor.
+  - `Remote::connect` is replaced by `connect_via`, which requires the Tor `Mode`, the `Cover` setting and the SOCKS5 proxy; no constructor picks a mode.
+- **The content service gets two connections, room text and media** (`spark-client::ContentService`, `Client::traffic_class`)
+  - `put`, `get` and `release` take a traffic `Class`: room-log chunks go as `Text` (over Tor in the default mode), media as `Media` (direct); the in-process `wiring::Local` ignores it.
+  - `Remote::content_calls()` counts the requests each connection actually carried, and `Client::services()` exposes the services so a caller can read these counts and the ledger.
+- **Cover traffic on a live connection, off by default** (`spark-transport::paced::Paced`, `spark-cli` `remote::Cover`, `serve::paced_session`)
+  - With `Cover::Every(interval)`, every non-media connection sends one uniform `hysteria` frame per slot, dummy or not, with requests riding inside; `Remote::cover_slots()` counts the slots sent. Media connections are never paced.
+  - The server answers each received cover frame with exactly one frame of the same size (a reply, part of one, or a dummy); a connection is paced if its first message is exactly one cover frame, and stays so.
+  - The slot clock is a `Ticker` parameter (`RealTicker`, default F12's 60 s; `Immediate` for tests).
+  - `docs/threats.toml` cites the live-connection tests as evidence for the cover-traffic threat and records that, off by default, the threat is unmitigated for anyone who does not turn it on.
+- **`spark remote-demo` takes `--cover [seconds]` and reports routing** (`spark-cli` `main.rs`): runs with Tor off and prints each connection's route, the text/media request split and the number of paced transmissions.
+- **Blind signing's private-key exponentiation no longer runs in `rsa`** (`spark-crypto::blind::IssuerKey::blind_sign`, `blind::ct`) (RUSTSEC-2023-0071, the Marvin Attack: `rsa` is not constant-time and has no patched version)
+  - `s = m^d mod n` runs on `crypto-bigint`'s constant-time modular exponentiation at the modulus's full precision; PSS encoding, blinding, unblinding and verification stay in `blind-rsa-signatures`, and signatures are byte-identical to its output.
+  - Each signature is re-encrypted under `e` (variable-time, bounded by `e`'s bit length) and compared with the input before it is returned.
+  - A source check fails if anything other than `components()` is called on the library's secret key, or if the variable-time path is given anything but `e`; the `deny.toml` ignore for RUSTSEC-2023-0071 now rests on it and on the reference-comparison test. Pacing and key rotation stay as defence in depth.
+- Measured: 2026-09-02, release build (README): 3.1 ms per blind signature with the re-encryption check variable-time (6.1 ms with it constant-time too), inside the 50 ms pacing tick.
+- Tests added: 13
+  - cover traffic on a live connection (4): transmissions of uneven size in either direction, idle and busy connections that differ on the socket, media travelling in the paced stream.
+  - routing of the real client (4): a direct connection under always-on Tor, room text and media sharing a connection or a route, a paced client unable to hold a conversation.
+  - constant-time blind signing (4): signatures that differ from `blind-rsa-signatures`, a short signature not padded to the modulus, a malformed blinded message being signed, an over-wide private exponent being truncated.
+  - Marvin source check (1): a secret-key operation routed back through `rsa`, or the variable-time ladder given anything but `e`.
+- Docs: `README.md` quick-start count, "Cover traffic" (live connection, off by default), new "Routing, and where it is actually applied", "Known risk: RUSTSEC-2023-0071" rewritten as "RUSTSEC-2023-0071, and what was done about it"; `LICENSE` added (AGPL-3.0 text).
+- Total: 15 .rs files changed (2 new), +1645 / −55 lines; data and config files: `deny.toml`, `docs/threats.toml`; dependencies: added `crypto-bigint` 0.7 to `spark-crypto` (already in the graph through `rsa`); tests: 217 → 230 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 7
+
+- **The client reaches the three services over TCP** (`spark-cli` `remote::Remote`, `serve`; `spark-transport::Channel`) (`Services` had only the in-process implementation)
+  - `Remote` is a second `Services` implementation: one connection per service, TLS then WebSocket, speaking `spark-wire`; `wiring::Local` stays for in-process use.
+  - Each service listens on its own TCP port with a thread per connection; a frame that does not decode ends that connection without a reply.
+  - `Channel` carries frames as WebSocket binary messages over any `Read + Write` stream, synchronously; a response with a different `req_id` is discarded and text messages are ignored.
+- **New crate `spark-wire`: the wire format of `docs/protocol.md` §6** (`crates/spark-wire`, layer 2, `pure`)
+  - `req_id: u32le || opcode: u8 || payload` with a postcard payload; frames shorter than the 5-byte header or over 16 MiB (`MAX_FRAME`) are refused, and a frame whose opcode disagrees with its decoded body is rejected (`OpcodeMismatch`).
+  - Per-service request and response enums are separate from the servers' own `Request` types; each server converts in a new `wire.rs` (`handle_wire`), where a wrong-length key or signature is refused (keyring `BadAuth`, issuer `BadName`).
+  - The issuer protocol has no listing operation, and no content operation carries an identity.
+- **TLS pinned to the server's public key instead of the WebPKI** (`spark-transport::tls`, `Pin`)
+  - The pin is SHA-256 of the certificate's SubjectPublicKeyInfo, so a certificate renewed over the same key keeps it; the verifier ignores name, chain and dates, compares against the pin set in constant time, and leaves handshake signature checks to rustls.
+  - An empty pin set is refused (`TlsError::NoPins`), and session resumption is off.
+  - Servers present a self-signed certificate generated at startup (`certs::generate`), so the pin changes on every restart.
+- **`spark serve` and `spark remote-demo` added** (`spark-cli` `main.rs`)
+  - `serve` runs the three services on 127.0.0.1, ports 9310–9312 unless given, and prints the pin.
+  - `remote-demo` runs the two-account conversation of `demo` over loopback sockets.
+- **Reproducibility check copes with TLS's C code and the linker build ID** (`scripts/build-repro.sh`, `scripts/verify-reproducible.sh`) (gate 1 failed once TLS arrived: Apple's linker derives `LC_UUID` from input paths)
+  - C, C++ and assembly built through `cc` (for `ring`) get `-ffile-prefix-map` for the build, source and cargo-home paths, as a precaution (no such path was found in the output).
+  - On Linux the build ID is dropped (`--build-id=none`); on macOS, where dyld will not run a Mach-O without `LC_UUID`, the comparison zeroes `LC_UUID` and the ad-hoc signature before hashing, and the PASS line says so.
+- Measured: 2026-09-02, `scripts/verify-reproducible.sh` (README quick-start figure; platform not recorded): 193 artifacts identical across two builds (150 before).
+- Tests added: 20
+  - wire format (10): an encoding that drifts from §6 or from postcard's variant tag, a lying-header or bad-length frame being accepted, an issuer operation that could enumerate names, a content operation carrying an identity.
+  - client over TCP and TLS pinning (10): the networked client behaving differently from the in-process one, a malformed frame taking a server down, a connection to an unpinned, key-less or plaintext server succeeding, a pin that does not survive certificate renewal.
+- Docs: `README.md` quick start (`remote-demo`, `serve`, counts), Status ("There is still no network" replaced by the network and TLS paragraphs), new sections "The wire" and "TLS, and why not the WebPKI".
+- Total: 20 .rs files changed (14 new), +2332 / −1 lines; data and config files: `docs/layering.toml`, `scripts/build-repro.sh`, `scripts/verify-reproducible.sh`; dependencies: added `tungstenite` 0.30, `rustls` 0.23 (`ring`), `rustls-pki-types` 1, `x509-cert` 0.2, `rcgen` 0.14; tests: 197 → 217 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 6
+
+- **The client works end to end against in-process services** (`spark-client`: `Client`, `services::Services`; was a stub)
+  - `Client` opens an account from its recovery phrase (one call for a new account and a restore) and covers rooms, invitations by key package, text messages and shared files. It reaches the three services only through the `Services` trait, whose one implementation is the in-process `wiring::Local` in `spark-cli`; there is no network binding (README "Status").
+  - A restored client gets back the MLS group state as well as the archive secrets: the provider's storage is written into the keyring after creating, inviting or joining (`save_mls`), so the client knows who is in each room and which lanes to read.
+  - `sync` keeps no read cursor: it resumes from the history held in memory and probes each member's lane forward until `probe_ahead` consecutive misses, one chunk name per request. Entries whose signature does not verify are dropped.
+  - Every keyring change is written as a whole snapshot. `put_delta`, names, contact requests and receipt release are in the `Services` trait, but no `Client` method calls them yet.
+- **`spark demo` and `spark new`** (`spark-cli`: `main.rs`, `wiring.rs`)
+  - `demo` runs all three services in one process, has two accounts hold a conversation through `Client`, prints both views and how many bytes each service holds, and exits 1 if any message plaintext is found in a service's storage.
+  - `new` generates a recovery phrase from OS entropy and prints the address it derives.
+  - `spark-cli` moves to layer 11, zone `io` (was layer 6, `boundary`) and may depend on the three server crates (`docs/layering.toml`).
+  - `main.rs` no longer has `#![forbid(unsafe_code)]`.
+- **The keyring holds a write cursor and no read cursor** (`spark-keyring`: `Generation::my_next`, `Delta::ReserveSlot`)
+  - `Generation.heads` (highest sequence read, per lane) is replaced by `my_next`, the next slot this account will write; `Delta::AdvanceHead` becomes `Delta::ReserveSlot`, still applied as a maximum, and `Outbox::reserve` emits it. (A persisted read cursor survived a wipe while the messages behind it did not, so a restored client resumed past history it never fetched.)
+  - MLS state is one account-wide blob (`Keyring::mls_state`, `Delta::SetMlsState(Vec<u8>)`) instead of one per room; each room keeps `mls_group_id` to find its group in it.
+  - Gate 6's restore and the keyring recovery test probe lanes forward from slot 0 instead of reading cursors from the keyring.
+- **MLS key packages and groups cross the crate boundary as bytes** (`spark-mls`: `publish_key_package`, `Room::add_member_bytes`, `Room::load`)
+  - Key packages are serialized inside an `MlsMessageOut`, so callers above `spark-mls` need no openmls types; `add_member_bytes` validates a package's signature and lifetime before adding the member.
+  - `Room::load` reopens a group from restored provider storage by its group id.
+- **Names are bought with verified blind vouchers, and expire** (`spark-issuer`; `spark-crypto::blind`: `VoucherClaim`, `Grant`)
+  - `Request::Purchase` replaces `BlindSign` (which returned a placeholder `blindsig:` signature): the issuer marks the payment reference spent (`payment_spent` table) and blind-signs the voucher claim under its own RSA key, separate from the keyring service's token key.
+  - `Register` and `Renew` verify the voucher before spending its serial and require its tier to match the name's (premium means one or two characters, `is_premium`). (Voucher bytes used to be recorded as spent without any verification.)
+  - `Purchase` refuses only a zero amount: nothing checks the payment reference against a chain or the amount against `VoucherClaim::price`, and nothing redeems a `Grant::Storage` voucher yet.
+  - A name is paid through `today + 30 × months`. `Resolve` takes today's date and stops answering 10 days after the paid-through day (`GRACE_DAYS`), when `Register` sells the name again; `Renew` extends from the later of the paid-through day and today.
+  - The tier is stored per name (`name_tier`) and kept across a transfer; `name_tier` and `spent_payment_ref` join the issuer's permitted fields (`docs/permitted-knowledge.toml`, `server/issuer-schema.toml`).
+- **RUSTSEC-2023-0071 mitigated by paced responses and key rotation** (`spark-crypto`: `pace`, `KeySet`, `verify_any`; `handle_paced` on the keyring service and the issuer)
+  - `handle_paced` holds each response until the next whole 50 ms tick (`Pacing::DEFAULT`) and counts requests that ran past one tick (`pacing_overruns`); the clock is the `Clock` trait. No real `Clock` implementation exists yet, and the CLI calls the unpaced `handle`.
+  - Both signing services keep the current and the previous key (`KeySet`), so a token or voucher still verifies through one rotation (`rotate_issuer_key`, `rotate_signing_key`); `verify_any` checks every accepted key rather than stopping at a match.
+  - The content service takes a list of token keys (`Content::with_keys`), fixed at construction, so it does not follow a later rotation of the keyring service's key.
+  - `deny.toml` still ignores the advisory; its reason now cites these mitigations instead of "not accepted for launch".
+- **Cover traffic: a fixed transmit schedule** (`spark-transport::hysteria`)
+  - `Hysteria::tick` returns exactly one 4096-byte frame per 60 s slot whether or not anything is queued; a message longer than a frame splits across slots (`Reassembler` rebuilds it), and media is refused.
+  - `enable` refuses on iOS with the sentence to show the user, and returns a schedule on desktop and Android. (The mobile spike has not been run, so iOS is treated as unable.)
+  - Not connected to `Transport` or the client yet.
+- **Push registers only when switched on** (`spark-transport::push`)
+  - `register` takes the platform's token-minting call as a closure and does not call it when the setting is off.
+  - The setting is on by default and carries the warning for each state (`Setting::warning`); the wake-up payload is empty (`Wake`), and a token's `Debug` output is redacted.
+  - No service delivers pushes; W2 records why none should be built yet.
+- **Threat register, checked by gate 12** (`docs/threats.toml`, `spark-invariants/tests/gate12_threats.rs`)
+  - W1, W4 and W6 are mitigated; W2, W3, W5 and W7 are accepted. Each names its evidence tests (which must exist), what remains after the mitigation, and where the user is told.
+  - W2 records that push on by default (`Spark-spec.md` D3) cannot coexist with servers holding no real-world identifiers (`Spark-build-notes.md` §2), and that no delivery service is to be built until that is decided.
+  - `toml_lite` reads multi-line strings.
+- Tests added: 59
+  - client end to end (7, `spark-cli/tests/end_to_end.rs`): layers that are each correct failing once wired together — message order, the two members' views disagreeing, recovery from the phrase, plaintext or file metadata reaching a server.
+  - gate 10, names and vouchers (13): a payment, voucher or name becoming linkable or reusable, forged or wrong-tier vouchers, a transfer record, expiry touching quota, wrong grace and renewal arithmetic.
+  - gate 11, cover traffic (10): idle and busy captures differing in count, size or timing; media in the stream; iOS offered the mode.
+  - gate 12, threat register (8): a threat left unresolved, evidence naming a test that does not exist, a missing residual or user statement.
+  - pacing and key rotation (15, `spark-crypto` and `marvin_pacing.rs`): response time following the work, overruns going uncounted, pacing changing answers, a rotation invalidating tokens or vouchers already held.
+  - push (6): the platform being asked for a token while push is off, a token in debug output, content in the wake-up.
+- Docs: README.md — "Status" rewritten (all twelve stages, `spark demo`, no network yet, nothing run on a phone), Gate 10–12 paragraphs added, new "Push" and "Cover traffic" sections, "Blocking before launch" replaced by "Known risk: RUSTSEC-2023-0071".
+- Total: 35 .rs files changed (14 new), +4447 / −194 lines; data and config files: `docs/threats.toml` (new), `docs/layering.toml`, `docs/permitted-knowledge.toml`, `server/issuer-schema.toml`, `deny.toml`; dependencies: no new crates (`spark-client` uses `openmls_rust_crypto`, `openmls_traits`, `openmls_memory_storage` and `postcard` directly, `spark-cli` uses `getrandom`); tests: 138 → 197 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 5
+
+- **Application messages are archived under the room chunk's own AEAD and signed by the sender** (`spark-sync::entry`, `Payload::Application(Signed)`) (was `Application(MlsMessageOut)`: MLS deletes each sender-ratchet key as it is used, so an archive of MLS ciphertexts could not be read after a restore, even by its owner; `docs/protocol.md` §5.0)
+  - The signature, by the identity key that is also the MLS credential, covers `spark/v1/msg`, lane, seq, epoch and body, so a message cannot be replayed into another slot; `Entry::decode` also rejects an entry whose declared slot differs from the one it was fetched from.
+  - Commits stay MLS ciphertexts (`Payload::Commit`), consumed live and never replayed from the archive.
+  - Forward secrecy no longer covers the archive: anyone holding the seed can read all history.
+- **The archive root rotates with every MLS epoch; a keyring holds one generation per epoch** (`spark-mls::Room::root`, `spark_keyring::Generation`) (a root fixed at room creation let a removed member derive the names of, and decrypt, everything written after they left)
+  - The root is the MLS exporter secret under `spark/v1/room-root`, derived by every member; `Room::create` and `Room::join` no longer take a root, and only past generations need re-sharing to a late joiner.
+  - A keyring room holds its generations (epoch, root, lane heads) oldest first; `Delta::OpenGeneration` adds one and never overwrites an epoch already recorded, and `Delta::AdvanceHead` names the epoch.
+  - `Dissolution` carries the generation count instead of the root.
+  - The keyring has a field for serialized MLS group state (`Room::mls_state`, `Delta::SetMlsState`); nothing writes it yet.
+- **Total order, vector clocks and the outbox** (`spark-sync`: `total_order`, `Clock`, `Outbox`, `plan`) (was a stub)
+  - `total_order` sorts by epoch, then causally by vector clock, then by lane bytes and seq for concurrent writes, as a deterministic topological sort; a causal cycle from a hostile client falls back to lane/seq order instead of hanging.
+  - `Outbox::reserve` returns the slot reservation together with the `AdvanceHead` delta to persist before sealing, and an abandoned slot is never handed out again; `room::seal` itself still takes a bare `Slot`.
+  - `plan` lists the next slots to fetch in each lane, one name per request.
+  - spark-sync no longer depends on spark-mls: payloads stay opaque bytes, which keeps the order a pure function (`docs/layering.toml`).
+- **Storage tokens are RFC 9474 blind RSA** (`spark-crypto::blind`, `spark-tokens`, keyring and content services) (the placeholder `token-{addr}-{n}` embedded the address, and the content store records each spent serial)
+  - `spark-crypto::blind` wraps `blind-rsa-signatures` as RSABSSA-SHA384-PSS-Randomized with a 2048-bit modulus; the signed message (`TokenClaim`) is a client-chosen 32-byte serial plus a power-of-two size class with a 1 KiB floor.
+  - `spark-tokens::begin` blinds a batch and `finish` unblinds it, consuming the `Withdrawal`, so a blinding secret cannot be used twice.
+  - Keyring service: `WithdrawTokens` takes blinded messages and a size class (10–40), debits 2^class bytes per token from the media quota and returns blind signatures; `GetIssuerKey` serves the public key without authentication.
+  - Content service: `Put` carries the claim and token, verifies the signature before spending the serial (`Refusal::BadToken`) and refuses a chunk larger than the size class (`Refusal::TooLarge`); it holds only the issuer's public key.
+  - RUSTSEC-2023-0071 (Marvin Attack: `rsa` is not constant-time, and the keyring service signs on a server) is ignored in `deny.toml` for development and listed under README "Blocking before launch" as not accepted for launch.
+- **Contact requests and invites** (`spark_identity::reach`; keyring service `PutRequest`, `GetRequests`, `DropRequest`)
+  - An invite is address, KEM key and a 16-byte invite secret, encoded as hex with a 4-byte checksum, so a mistyped one fails (`InviteError::BadChecksum`) rather than resolving to another address.
+  - A request is sealed to the recipient's KEM key under an ephemeral X25519 key and carries the sender's public identity, a note and optionally the invite secret; `open_request` marks it `invited` only when the secret matches, and a wrong secret is not an error.
+  - The keyring service holds up to 64 requests per address (`MAX_PENDING`); `PutRequest` is unauthenticated and answers `RequestTaken` whether the request was stored, dropped for a full tray, or sent to an address that does not exist, and `DropRequest` notifies nobody.
+  - The request's token is only recorded as a spent serial, not verified against the issuer key.
+  - `server/keyring-schema.toml` gains the `request` table, and the keyring service's permitted-knowledge list `request_index` and `request_bytes` (it sees the recipient at write time; protocol §9.5).
+- **Names resolve to the full public identity** (`spark-issuer`: `Register`, `Transfer`, `Resolved`): a 64-byte signing key plus KEM key (was the 32-byte signing key), so a resolved name is enough to seal a request; `Transfer` verifies against the first 32 bytes.
+- **Key-migration attestation** (`spark_identity::reach::Migration`): the old key signs `spark/v1/migrate` with both keys, verified locally with no server state.
+- **Media is sealed only after metadata stripping** (`spark-chunk::scrub`, `media::seal`)
+  - `scrub` drops every JPEG APPn and COM segment and every PNG chunk outside a seven-chunk allow-list, walking container structure only.
+  - GIF, RIFF/WebP, MP4/HEIC, TIFF and Matroska files are refused (`ScrubError::UnknownFormat`), as is a truncated file; other bytes pass through as `Format::Opaque`.
+  - `media::seal` and `media::capability` take a `Scrubbed`, which only `scrub` constructs; `seal_raw` and `capability_raw` take raw bytes for data Spark produces itself.
+  - Two copies of a photo that differ only in metadata produce one chunk.
+- **Traffic-class routing over Tor** (`spark-transport`: `Transport::open`, `Mode`, `Class`, `socks::connect`) (was a stub)
+  - `Mode` is `AlwaysOn`, `AlwaysOff` or `TextOverTor` (the default: control and text over Tor, media direct), and `open` takes the `Class` as a required argument.
+  - SOCKS5 sends the hostname for the proxy to resolve (`ATYP=0x03`) and uses a different username per request for Tor's `IsolateSOCKSAuth`; a proxy that refuses username/password is refused (`SocksError::NoIsolation`) rather than falling back to no-auth.
+  - Every successful connection is recorded in a `Ledger` (class, host, port, via Tor), which gate 9 checks; `set_mode` does not clear it.
+  - No WebSocket framing or TLS yet (README "Tor").
+- **The entropy ban for `pure` crates moved from the manifest to the source** (`docs/layering.toml`) (RFC 9474 prime generation pulls `getrandom` in transitively)
+  - `getrandom` and `rand_core` left `banned_in_pure`.
+  - `OsRng`, `thread_rng`, `rand::random`, `from_entropy()` and `getrandom::` joined `pure_source.banned_paths`.
+- Measured: 2026-09-01, `scripts/verify-reproducible.sh` over two builds: 130 → 150 artifacts byte-identical (README Status).
+- Tests added: 62
+  - gate 6 recovery (5): a restore that misses a generation or reorders history, plaintext or graph edges in the server databases, a late joiner reading earlier history, a wrong seed recovering anything.
+  - gate 7 reachability (9): name enumeration, reaching someone without acceptance, a sender learning a request's fate, mistyped invites, forged migrations.
+  - gate 8 storage (8): deduplication and charging, per-member copies of room history, receipts lost on restore, dissolve sparing room chunks or freeing shared media, the content store or a refund linking uploads to accounts, quota overrun.
+  - spark-transport routing, gate 9 (10): direct connections in always-on mode, non-media direct connections in mixed mode, local name resolution, shared circuits, a no-auth fallback.
+  - spark-sync ordering (14): history depending on arrival order, causality or epoch violations, a causal cycle hanging, slot replay, clock rewind, slot reuse, unverified authorship.
+  - spark-chunk scrub (8): metadata surviving a JPEG or PNG send, an unknown format passed through, a truncated file accepted.
+  - spark-crypto blind (5): a token verifying for another message or issuer, linkable tokens, a public key that does not round-trip.
+  - spark-mls rooms (3): members deriving different roots, a root that does not rotate, a removed member deriving the next one.
+- Docs: README.md Status (stage 5 → 9 of 12, gates 6–9) and new sections Generations, Tor, Metadata stripping, Blocking before launch; `docs/protocol.md` §5 (`Payload` grammar) and new §5.0.
+- Total: 36 .rs files changed (17 new), +4815 / −179 lines; data and config files: `deny.toml`, `docs/layering.toml`, `docs/permitted-knowledge.toml`, `server/keyring-schema.toml`; dependencies: added `blind-rsa-signatures` 0.17 (`spark-crypto`; brings in `rsa` 0.10.0-rc.18); tests: 76 → 138 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 4
+
+- **Server storage records its own shape** (new crate `server/spark-store`, `Db`; layer 9, zone `io`)
+  - In-memory tables whose rows carry named fields; every write records its field names, and `Db::inventory` lists every field ever written, deleted rows included.
+  - `put_if_absent` is the one write-once primitive (content names, spent tokens, spent vouchers).
+  - Each service is an in-process `handle(Request) -> Response` over its own `Db`; none listens on a network yet.
+- **Keyring service implemented** (`server/spark-keyring-server`, `Keyring::handle`)
+  - Authentication is stateless: the challenge is an HMAC of the address and the current minute under a server secret, the address must be the hash of the presented key, and the signature must verify over the current challenge. The caller sets the minute (`set_minute`); the service reads no clock.
+  - One snapshot and an indexed delta list per address; a new snapshot drops the deltas, an append reports `compact` from the 64th delta on, and bytes that are not a chunk are refused.
+  - Quota starts at 1 MiB per key (`FREE_QUOTA`); token withdrawal debits it, a refund voucher (spendable once) credits it back, and requests are counted per address per minute.
+  - Withdrawn tokens are placeholder strings containing the address in hex (`token-{addr}-{n}`); RFC 9474 blind RSA is deferred to stage 8.
+- **Content service implemented, with no accounts** (`server/spark-content-server`, `Content::handle`)
+  - Names are write-once; a taken room-chunk name is refused (`NameTaken`) so the losing commit-lane writer moves to the next seq.
+  - A duplicate media upload still spends its token and gets a receipt and the same `Stored` response as a fresh one.
+  - A media name must equal `SHA-256(chunk)` (`NameMismatch` otherwise); room-log names are accepted as claimed.
+  - Media is freed when its receipt count reaches zero; `Delete` removes a room-log chunk outright and is refused for media. Each release returns a refund voucher.
+  - `Get` and `Head` take only the name.
+  - Tokens are only checked against the spent list, not verified; receipts and vouchers are counter-based stand-ins, and the receipt is stored as-is in the `receipt_hash` field.
+- **Issuer implemented** (`server/spark-issuer`, `Issuer::handle`)
+  - Names resolve by exact match only; registering takes 1–64 ASCII letters, digits or `-`, refuses a held name, and spends a voucher.
+  - A transfer signed by the current holder over the name and new key overwrites the mapping and keeps the paid-until day; no history is kept.
+  - `BlindSign` spends a voucher and counts the issuance but returns a placeholder, not a signature (RFC 9474 deferred to stage 10); vouchers are only checked against the spent list.
+- **Workspace marked unpublishable** (`Cargo.toml`: `publish = false`, inherited by every crate)
+- **CI cross-machine check runs in a pinned container** (`.github/workflows/ci.yml`, `cross-machine`)
+  - Two replicas on `ubuntu-latest` inside `rust:1.94.1-slim-bookworm` (was `ubuntu-latest` against `ubuntu-22.04`, which failed because the images differ in glibc, linker and `cc`).
+  - `compare-machines` fails on a missing or empty manifest.
+  - `scripts/verify-reproducible.sh` hashes with `sha256sum` when present, `shasum` otherwise (the slim image has no perl).
+- **cargo-deny config admits the OpenMLS tree** (`deny.toml`)
+  - `MPL-2.0` allowed, for `hpke-rs` and its backends.
+  - `RUSTSEC-2026-0173` (`proc-macro-error2` unmaintained) ignored by ID; it is reached only through the dev-dependency `openmls_rust_crypto`.
+  - `allow-wildcard-paths = true`, so version-less workspace path dependencies pass the wildcard ban.
+- Measured: 2026-08-31, `scripts/verify-reproducible.sh`, two release builds: 128 → 130 artifacts byte-identical.
+- Tests added: 13
+  - gate 5, one in-process session through all three services (6): a stored field outside `docs/permitted-knowledge.toml`, `server/*-schema.toml` drifting from what the code writes in either direction, plaintext or a two-account row on any server, the server's address derivation drifting from the client's, a wrong key or stale challenge authenticating. `spark-invariants` gains dev-dependencies on the crates it audits; its `[dependencies]` stay empty.
+  - content-service rules (7): an overwritable name, a discounted or distinguishable duplicate upload, a reusable token, a forged media name, media freed while held or room chunks surviving deletion, reads that require anything.
+- Docs: README.md — Status (stage 5 of 12, gate 5) and a new "The three services" section.
+- Total: 6 .rs files changed (3 new), +1705 / −9 lines; data and config files: `.github/workflows/ci.yml`, `deny.toml`, `scripts/verify-reproducible.sh`, `docs/layering.toml`; dependencies unchanged; tests: 63 → 76 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 3
+
+- **Chunk format implemented** (`spark-chunk`; `Chunk`, `media`, `room`, `LaneId`; `docs/protocol.md` §3–4)
+  - A chunk is a 32-byte header (magic, version, kind, nonce) used as AAD, then ciphertext; nothing else sits outside the AEAD, the caller of `Chunk::seal` supplies the nonce, and a non-zero reserved flags field is rejected.
+  - Media is convergent: key and nonce derive from the file's hash, and the name is `SHA-256(chunk)`, which the store can verify without a key.
+  - Room-log chunks are named `HMAC(room_root, lane ‖ seq)`, with key and nonce derived from the same slot; the store cannot verify the name and an outsider cannot compute it.
+  - A room has one commit lane and one message lane per member, keyed by identity key (MLS leaf indices are recycled, so two members could land on one lane).
+- **Chunk AEAD and naming MAC added** (`spark-crypto`; `aead`, `mac`)
+  - XChaCha20-Poly1305 (chosen over AES-256-GCM for the 24-byte nonce, since room-chunk nonces are derived); every open failure is the single `AeadError::NotAuthentic`, and plaintext comes back zeroizing.
+  - HMAC-SHA256 over several parts (`hmac_sha256_parts`), for room-chunk names.
+  - `Secret` serializes only behind the opt-in `serde` feature, which only `spark-keyring` enables.
+- **Keyring is a sealed snapshot plus append-only sealed deltas** (`spark-keyring`; `Keyring`, `Delta`; contents per `docs/protocol.md` §8)
+  - Both are `Kind::Keyring` chunks under the seed-derived keyring key, postcard-encoded after a tag byte, so a delta opened as a snapshot fails instead of decoding; `Keyring::restore` rebuilds from a snapshot and its deltas.
+  - Every delta is idempotent, and lane heads advance as a maximum, so a replayed or out-of-order delta cannot rewind history.
+  - `COMPACT_AFTER = 64` is declared; nothing compacts yet.
+  - `Debug` prints counts only, never room roots.
+- **Rooms: the F4 owner policy on OpenMLS** (`spark-mls`; `Room`, `OwnerSet`; README "Rooms")
+  - OpenMLS 0.9 with ciphersuite `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`; the provider (entropy, crypto backend, storage) is passed into every call, so the crate stays `pure`.
+  - The owner set is a group context extension (`OWNERS_EXT = 0xff5b`), so every owner change is a commit ordered by MLS; joining a group without one fails (`OwnerSetError::Missing`).
+  - The MLS signature key and credential are the Spark identity key (`signer_for`).
+  - Only owners add, remove, appoint and dismiss; the last owner cannot leave, be dismissed or be removed. `dissolve` is for the sole owner, returns the room root for deleting the room's chunks, and sends nothing to members.
+  - `Room::join` takes the room root as a parameter (MLS gives a joiner no pre-join history, so a member re-shares it out of band).
+  - `Room::leave` returns a proposal; the departure takes effect when an owner calls `commit_pending`.
+  - Removing an owner makes two commits, the removal and then the owner-set update, and `remove_member` returns only the second (its doc comment says one commit).
+- **Zone bans check shipping dependencies only** (`spark-invariants`; `check_layering`, `cargo_shipping_deps`)
+  - Dev-dependencies are exempt from the `pure` and `boundary` bans but still count in the dependency-graph checks; every exemption is listed by name in `tests/layering.rs` (only `spark-mls` → `openmls_rust_crypto`).
+  - `docs/layering.toml` bans `getrandom`, `rand`, `rand_core`, `openmls_rust_crypto` and `openmls_memory_storage` in `pure` crates (entropy is a parameter everywhere below the I/O line).
+- Measured: 2026-08-31, `scripts/verify-reproducible.sh`, two release builds: 65 → 128 artifacts byte-identical.
+- Tests added: 33
+  - chunk format (16): a tampered or relabelled chunk opening, malformed or reserved-flag chunks getting past the boundary, a media name the store cannot verify, room names or keys that repeat across slots or can be computed without the root, lanes keyed by position.
+  - gate 3, recovery from the seed alone (6): history that needs more than the 24 words, plaintext on either server, a wrong seed opening anything, a guessed sentence locating its chunk, replayed or out-of-order deltas changing the keyring, a delta opening as a snapshot.
+  - gate 4, rooms (10): members diverging, a removed member reading on or staying an owner, the last owner leaving, a non-owner managing the room, a 1:1 needing its own path, an MLS leaf that is not its Spark identity, a malformed or non-canonical owner set.
+  - layering (1): an unlisted dev-only exception to the zone bans.
+- Docs: README.md — Status (stage 4 of 12, gates 3 and 4) and new sections "The envelope" and "Rooms".
+- Total: 22 .rs files changed (14 new), +2720 / −57 lines; data and config files: `docs/layering.toml`; dependencies: added `chacha20poly1305` 0.10, `hmac` 0.12 and optional `serde` 1 (`spark-crypto`), `serde` 1 and `postcard` 1 (`spark-keyring`), `openmls` 0.9, `openmls_traits` 0.6, `openmls_basic_credential` 0.6 and dev-only `openmls_rust_crypto` 0.6 (`spark-mls`); tests: 30 → 63 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 2
+
+- **Identity derived from the seed alone** (`spark-identity`, `Identity`)
+  - The Ed25519 signing key, the X25519 key, the keyring AEAD key and the keyring address (`Addr`) are derived exactly as `docs/protocol.md` §2 specifies.
+  - Only `from_mnemonic`, `from_seed` and `from_phrase` construct an `Identity`. The BIP-39 passphrase is fixed to empty and is not a parameter (`docs/protocol.md` §9.1 is still open).
+  - No at-rest key storage (build-notes §5 lists it for stage 2; a `pure` crate has no filesystem and no passphrase is decided, so it is deferred to `spark-client`).
+- **24-word mnemonics only** (`spark_crypto::Mnemonic`)
+  - Entropy is passed in by the caller (`from_entropy`); the crate never reads OS randomness and has no `getrandom` dependency.
+  - `parse` rejects valid 12-word phrases (`WrongWordCount`) as well as unknown words and bad checksums; surrounding whitespace is trimmed.
+- **`spark-crypto` wraps audited primitives** (`spark-crypto`: `hash`, `kdf`, `sign`, `kem`, `secret`)
+  - SHA-256, HKDF-SHA256 (extract and expand kept separate), Ed25519 and X25519, through `sha2`, `hkdf`, `ed25519-dalek` and `x25519-dalek`; no algorithm of its own.
+  - Key material is held in `Secret<N>`: zeroized on drop, compared in constant time, `Debug` shows only the length. `SigningKey`, `KemSecret` and `Mnemonic` also redact `Debug`; `Identity` shows only its `Addr`.
+  - XChaCha20-Poly1305 and the RFC 9474 blind-signature client (both in `docs/protocol.md` §1) are not implemented yet; they land with stages 3 and 8.
+- **Derivation frozen by committed test vectors** (`crates/spark-identity/tests/vectors.txt`, written by the `gen-vectors` example): two seeds (all-zero and counting entropy), each pinning the phrase, seed, both public keys, `addr` and the keyring key.
+- **Harness rejects any non-seed path to an `Identity`** (`spark_invariants::check_identity_constructors`)
+  - Reads `crates/spark-identity/src/lib.rs` and fails on any public fn in `impl Identity` that returns the type and is not one of the three seed constructors.
+  - Also fails on `Deserialize`, `Default`, `From<[u8…]>` or `FromStr` derived or implemented for `Identity`.
+  - New broken fixture: a `from_device_backup` constructor (`fixtures/broken/identity-backdoor.rs`).
+- **Reproducibility check covers dependencies and build location** (`scripts/verify-reproducible.sh`, `scripts/build-repro.sh`)
+  - The two builds go to differently named temporary directories outside the repo (were `repro-a` and `repro-b` inside it), so a pass also shows the output does not depend on the build path.
+  - Artifacts under `release/deps/` are compared too (were top-level binaries and rlibs only).
+  - Proc-macro dylibs (`.dylib`, `.so`, `.dll`) are excluded and listed on every run (the macOS linker writes their absolute output path into the install name after `--remap-path-prefix`; they never ship, and their output is in the compared rlibs).
+  - `build-repro.sh` refuses an output directory inside the repo and remaps the output directory to `/target` (build scripts such as `serde_core`'s embed it).
+  - CI `cross-machine` builds into `$RUNNER_TEMP` and hashes with the same inclusion and exclusion rules.
+- Measured:
+  - 2026-08-31, `scripts/verify-reproducible.sh`, one machine, two differently named build directories: 65 artifacts byte-identical (15 at Initial Commit, when only top-level artifacts were compared); the excluded proc-macro dylibs differ in 53 bytes of 2.8 MB, all of it the output path (README "Status"; comment in the script).
+  - 2026-08-31, the `docs/protocol.md` §2 derivation chain against an independent Python PBKDF2-HMAC-SHA512 and HKDF-SHA256 implementation: matches; the zero-entropy mnemonic matches the official BIP-39 test vector (README "Status").
+- Tests added: 16
+  - identity derivation (12): drift from the frozen vectors, two purposes sharing a key, weakened or corrupt mnemonics being accepted, secrets in `Debug` output.
+  - identity constructors in the harness (4): a non-seed constructor, derive or impl for `Identity`; the vectors file going missing.
+- Docs: README.md "Status" (stage 2 of 12; how gates 1 and 2 hold; `cargo test --workspace` and the artifact count).
+- Total: 13 .rs files changed (10 new), +995 / −11 lines; data and config files: `.github/workflows/ci.yml`, `.gitignore`, `scripts/build-repro.sh`, `scripts/verify-reproducible.sh`, `crates/spark-identity/tests/vectors.txt`; dependencies: added `sha2`, `hkdf`, `ed25519-dalek`, `x25519-dalek`, `bip39`, `zeroize`, `subtle`; tests: 14 → 30 (`#[test]` functions in the source, not re-run).
+
+## Beta Commit 1
+
+- **CI compares the cross-machine manifests** (`.github/workflows/ci.yml`, job `compare-machines`): fails when `ubuntu-latest` and `ubuntu-22.04` produce different artifact manifests (`cross-machine` only uploaded them).
+- **cargo-deny config corrected** (`deny.toml`)
+  - `AGPL-3.0-or-later`, the workspace's own license, is on the license allow list (only `AGPL-3.0` was).
+  - The empty `[bans.skip-tree]` table is removed.
+- Total: No code changed; data and config files: `.github/workflows/ci.yml`, `deny.toml`; dependencies unchanged.
+
+## Initial Commit
+
+- **Workspace skeleton: 15 crates, all stubs** (`Cargo.toml`, `crates/`, `server/`)
+  - Eleven client crates from `spark-crypto` up to `spark-ffi` and `spark-cli`, the `spark-invariants` harness, and three servers, one per trust domain: `spark-keyring-server`, `spark-content-server`, `spark-issuer`.
+  - Each library exports only a `STAGE` placeholder; the `spark` binary (`spark-cli`) prints its version and stage. No cryptography, no third-party dependencies.
+  - Edition 2024, license `AGPL-3.0-or-later`; every crate is `#![forbid(unsafe_code)]`.
+- **Crate graph enforced** (`docs/layering.toml`, `spark_invariants::check_layering`, `check_pure_sources`)
+  - Every crate has a layer (dependencies point strictly downward) and a zone: `pure` (no network, filesystem or clock), `io`, or `boundary` (FFI and CLI, no cryptography). `spark-transport` is the only `io` crate below `spark-client`; the servers form a separate graph.
+  - Each real `Cargo.toml` is checked against the declaration: undeclared or missing workspace dependencies, upward dependencies, I/O crates (`tokio`, `hyper`, `rusqlite`, …) in `pure` crates, cryptography crates in `boundary` crates.
+  - `pure` crate sources may not name `std::net`, `std::fs`, `std::time::SystemTime`/`Instant` or `std::process` outside comments; a workspace member missing from `layering.toml` fails.
+- **Permitted knowledge enforced for the three servers** (`docs/permitted-knowledge.toml`, `server/*-schema.toml`, `spark_invariants::check_permitted`)
+  - Each server declares every persisted field in its `*-schema.toml`; the declaration must be a subset of that service's whitelist.
+  - A banned-concept list (`sender`, `room`, `uploader`, `ip`, `transfer_history`, …) applies to every field and table name, matched on `_`-separated tokens so `ip` catches `client_ip` but not `receipt_count`; there is no allow list.
+  - Checked against the declarations only; the server crates are stubs (gate 5 checks the real server).
+- **Harness proven against deliberately broken stubs** (`crates/spark-invariants/fixtures/broken/`, `tests/broken_stubs.rs`)
+  - Fixtures: an upload-to-key link, a room membership index named as bookkeeping, a name transfer history, and three layering slips (`tokio` in `spark-chunk`, `spark-crypto` → `spark-client`, `spark-ffi` → `spark-chunk`). Each rejection must name its specific reason.
+  - The harness has no dependencies; its TOML reader (`toml_lite`) covers only the subset the manifests use and fails on anything else rather than skipping it.
+- **Banned dependencies** (`deny.toml`, cargo-deny): HTML parsers, link-preview scrapers, embedded browsers and JS engines, push SDKs (`fcm`, `a2`) and telemetry (`sentry`, `opentelemetry`, `datadog-statsd`) are denied, as are wildcard versions and yanked crates; licenses are limited to an allow list.
+- **Reproducible builds** (`rust-toolchain.toml`, `[profile.release]`, `scripts/build-repro.sh`, `scripts/verify-reproducible.sh`)
+  - Toolchain pinned to 1.94.1; release builds use one codegen unit, `panic = "abort"`, debuginfo stripped.
+  - `build-repro.sh` fixes `SOURCE_DATE_EPOCH`, locale and timezone, disables incremental builds, remaps the repo and cargo-home paths and builds `--locked`.
+  - `verify-reproducible.sh` builds twice into separate target directories and compares the SHA-256 of the top-level binaries and rlibs.
+- **CI runs the harness, cargo-deny and the reproducibility check** (`.github/workflows/ci.yml`)
+  - `invariants`: harness tests, `cargo fmt --check`, `clippy -D warnings`. `banned-deps`: cargo-deny bans, licenses, advisories. `reproducible`: `verify-reproducible.sh`.
+  - `cross-machine` builds on `ubuntu-latest` and `ubuntu-22.04` and uploads each artifact manifest (nothing compares them yet).
+- Measured: 2026-08-31, `scripts/verify-reproducible.sh`, one machine, two builds: 15 artifacts byte-identical (README "Status").
+- Tests added: 14
+  - permitted knowledge (5): a server schema persisting a field outside its whitelist, a whitelist that contradicts its own ban list, token matching firing on innocent names.
+  - layering (3): `Cargo.toml` files drifting from `layering.toml`, I/O named in `pure` sources, undeclared workspace members.
+  - broken stubs (6): a check that passes everything; a manifest that half-parses.
+- Docs: README.md (stage 1 of 12, the three nets), Spark-spec.md, Spark-build-notes.md and Spark-ad.md, each with a Chinese copy (`-zh.md`); docs/protocol.md (v0 draft: primitives, derivation, chunk format, lanes, server API, open questions).
+- Total: 19 .rs files changed (19 new), +1064 / −0 lines; data and config files: `.github/workflows/ci.yml`, `.gitignore`, `deny.toml`, `rust-toolchain.toml`, `scripts/build-repro.sh`, `scripts/verify-reproducible.sh`, `docs/layering.toml`, `docs/permitted-knowledge.toml`, `server/keyring-schema.toml`, `server/content-schema.toml`, `server/issuer-schema.toml`, four fixtures in `crates/spark-invariants/fixtures/broken/`; dependencies: none (workspace crates only); tests: 0 → 14 (`#[test]` functions in the source, not re-run).
+

@@ -30,7 +30,7 @@ stubs left.
 
 ```bash
 cargo test --workspace                    # includes CLI subprocess tests
-scripts/verify-reproducible.sh            # 251 artifacts byte-identical across two builds
+scripts/verify-reproducible.sh            # 265 artifacts identical across two builds
 cargo run -p spark-cli -- demo            # two accounts in one process, and what the servers kept
 cargo run -p spark-cli -- remote-demo     # the same, over real sockets
 cargo run -p spark-cli -- serve           # the three services on TCP
@@ -69,8 +69,12 @@ capability arriving as `Vec<u8>` is one the Swift side can carry but not
 construct, because it has nothing to construct one with. The OS entropy source
 stops there too, since a caller above the line has no safe way to supply one.
 
-`libspark_ffi.a` and `libspark_ffi.dylib` are in the reproducible set, so the
-binary a phone would load is byte-identical from source like everything else.
+`libspark_ffi.a` and `libspark_ffi.dylib` (`.so` on Linux) are in the
+reproducible set: `scripts/repro-manifest.sh` names them, so they are compared
+like everything else. The dylib's install name is `@rpath/libspark_ffi.dylib`
+(`crates/spark-ffi/build.rs`) rather than the builder's output path, which would
+otherwise ship inside the library and differ between builds. These are host
+builds: the iOS and Android targets a phone would load are not built by the gate.
 
 **Nothing here has been run on a phone.** `Spark-build-notes.md` §5 stage 12 calls
 for a mobile spike, and the two assumptions it names as most likely to fail —
@@ -560,12 +564,9 @@ property backed by code review, not a machine-checked proof.
 
 ## Setup
 
-The toolchain is pinned to an exact version, because a different compiler can
-change codegen and break byte-identical rebuilds. Install it once:
-
-```bash
-rustup toolchain install 1.94.1
-```
+Spark builds with the current stable Rust; `rustup update` keeps it current. The
+compiler is not pinned, and a different compiler can change codegen, so a
+byte-identical rebuild of a binary needs the rustc that built it.
 
 ## The invariant harness
 

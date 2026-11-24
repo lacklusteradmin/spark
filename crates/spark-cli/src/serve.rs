@@ -96,7 +96,7 @@ where
             let Ok(stream) = stream else { break };
             use std::sync::atomic::Ordering;
             if active
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                     (n < 128).then_some(n + 1)
                 })
                 .is_err()

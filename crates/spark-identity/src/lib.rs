@@ -8,7 +8,7 @@
 //! This crate implements `docs/protocol.md` §2 and nothing else. The derivation
 //! path is the account: change a byte of an `info` string and every existing user
 //! loses their history. The constants below are therefore public, pinned by test
-//! vectors in `tests/vectors.json`, and are not to be edited without a migration
+//! vectors in `tests/vectors.txt`, and are not to be edited without a migration
 //! plan.
 //!
 //! **At-rest storage is deliberately absent.** It is named in build-notes §5

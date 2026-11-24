@@ -32,6 +32,8 @@ impl Profile {
             tor: self.tor.clone(),
             proxy: self.proxy.clone(),
             cover_seconds: 0,
+            // The terminal client has no push command, so push stays off.
+            push_consent: String::new(),
         }
     }
     fn connect(&self) -> Result<Session> {
@@ -69,7 +71,8 @@ init creates an account, or restores from --phrase-file (use - for stdin).
 The profile stores your recovery phrase UNENCRYPTED, with owner-only Unix
 permissions. Back it up securely. Do not run one account from multiple profiles
 at once. Tor defaults to text; local testing requires explicit --tor off.
-The bundled serve command uses memory only: stopping it loses all server data."
+The bundled serve command keeps server data, keys and the TLS pin in --data-dir
+(default spark-server-data), so they survive a restart."
     );
 }
 
@@ -215,8 +218,8 @@ fn init(args: &[String]) -> Result<()> {
         .first()
         .ok_or("expected a profile directory; run spark help")?;
     let mut opts = BTreeMap::new();
-    let mut rest = args[1..].chunks_exact(2);
-    for pair in &mut rest {
+    let (pairs, remainder) = args[1..].as_chunks::<2>();
+    for [name, value] in pairs {
         if ![
             "--pin",
             "--tor",
@@ -226,15 +229,15 @@ fn init(args: &[String]) -> Result<()> {
             "--issuer",
             "--proxy",
         ]
-        .contains(&pair[0].as_str())
+        .contains(&name.as_str())
         {
-            return Err(format!("unknown option: {}", pair[0]));
+            return Err(format!("unknown option: {name}"));
         }
-        if opts.insert(pair[0].as_str(), pair[1].as_str()).is_some() {
+        if opts.insert(name.as_str(), value.as_str()).is_some() {
             return Err("duplicate option".into());
         }
     }
-    if !rest.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err("every init option needs a value".into());
     }
     let pin = *opts
@@ -456,6 +459,9 @@ fn session_error(e: SessionError) -> String {
         SessionError::Malformed => "malformed room, invitation, or attachment handle",
         SessionError::Unscrubbable => "unsupported attachment: metadata cannot be safely removed",
         SessionError::Refused => "operation refused by the client or server",
+        SessionError::WarningNotShown => {
+            "push was not turned on: show the current warning and pass back exactly what was shown"
+        }
     }
     .into()
 }

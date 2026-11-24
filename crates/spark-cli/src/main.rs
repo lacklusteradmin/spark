@@ -173,10 +173,10 @@ fn cmd_serve(args: &[String]) -> i32 {
             }
         }
         let lock_path = directory.join("server.lock");
-        if let Ok(meta) = std::fs::symlink_metadata(&lock_path) {
-            if !meta.is_file() {
-                return Err("invalid deployment lock".into());
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(&lock_path)
+            && !meta.is_file()
+        {
+            return Err("invalid deployment lock".into());
         }
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true);

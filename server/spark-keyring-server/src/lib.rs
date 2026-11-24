@@ -459,7 +459,7 @@ impl Keyring {
             return Response::RequestTaken;
         };
         let hash = spark_crypto::sha256(&permit);
-        let Some(index) = permits.chunks_exact(32).position(|p| p == hash) else {
+        let Some(index) = permits.as_chunks::<32>().0.iter().position(|p| *p == hash) else {
             return Response::RequestTaken;
         };
         self.db.put_if_absent(
@@ -605,7 +605,9 @@ impl Keyring {
             return Response::Tokens(
                 c.bytes()
                     .unwrap()
-                    .chunks_exact(256)
+                    .as_chunks::<256>()
+                    .0
+                    .iter()
                     .map(|b| b.to_vec())
                     .collect(),
             );

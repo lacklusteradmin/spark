@@ -178,7 +178,7 @@ Push stays its own switch rather than folding into a combined profile. The three
 ### D4. Reproducible builds — adopted
 Open source establishes that the source is clean; reproducible builds establish that the binary was built from it. Without them, anyone who compromises the pipeline can ship a client that leaks plaintext or logs keys, and nothing server-side would look wrong — the whole design assumes an honest client.
 
-Build the pipeline this way from the first commit: pin compiler and dependency versions, remove every source of nondeterminism. Retrofitting after dozens of dependencies exist is far harder. This matters more once Spark is embedded in other applications, since those users trust a build made by someone else entirely.
+Build the pipeline this way from the first commit: pin dependency versions, remove every source of nondeterminism. The compiler is not pinned: builds use the current stable Rust, so a rebuild matches a binary only with the rustc that built it. Retrofitting after dozens of dependencies exist is far harder. This matters more once Spark is embedded in other applications, since those users trust a build made by someone else entirely.
 
 ### D5. Text ceiling — warn early, block at the cap
 The client warns as the cap approaches and blocks sending once reached. Blocking mid-conversation is the worst failure a messenger has, so the warning must arrive early. Reaching the cap means roughly 400,000 messages sent, so it is rare.

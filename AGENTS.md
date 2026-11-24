@@ -1,0 +1,26 @@
+## Git
+
+Never run `git commit`, `git stage`, `git reset`, or any other git state-modifying command without the user explicitly asking. After finishing code edits, stop. The user will say "commit this" when they want a commit. The check to run before a commit is under "CHANGELOG" below.
+
+## Project status
+
+Spark is prelaunch — no existing users. When changing storage formats, DB schemas, keychain keys, or serialized structures, change them directly. Skip migration shims and backward-compat code entirely.
+
+## CHANGELOG
+
+`docs/CHANGELOG.md` records what changed and why, newest first, one section per commit. Every change goes under `## Uncommitted` as it is made.
+
+**Tidying:** before the user commits (for example when asked to tidy the CHANGELOG), check `## Uncommitted` against the actual change (`git diff`). Every sub-entry must match one change in the diff; delete the ones that don't (usually unchanged parts, the full after-picture, or process). Add what the diff has and the entries don't. Numbers must match the code, and the wording must not claim more than was done. Then rename the heading to the commit's title (`## Beta Commit 11`).
+
+**How to write:**
+
+- **Tone:** an objective record. Don't address the reader ("you"), no chatty asides. Decisions the user has to make go in the conversation, not here.
+- **Only the changed result:** write what the changed thing is like now; where needed, one sentence in brackets for what it was before or why. No process ("first … then", "found … so", "tried …", the debugging story). No full after-picture either: that lives in the README, `Spark-spec.md`, `Spark-build-notes.md` or `docs/protocol.md`, and the entry points there in a phrase.
+- **One change, one sub-entry:** one bold short title per change, stating the result, with where it lives in brackets (file, type, function). Under it, one sub-entry per change, one or two sentences each. "One change" is something that can be matched in `git diff`: a behavior, a number or default, an interface or file that moved, whether old data still works. Many changes, many sub-entries; a change with a single point is the title line alone.
+- **No padding:** these aren't changes and don't get written: parts that didn't change (unless a reader would assume they did); per-item appearance and algorithm details (they belong in the docs or code comments); lists of functions and call sites; mechanical edits such as added fields or renames; a restatement of the title. A refactor that keeps behavior gets one line saying what was merged into what; how that was shown goes under `Measured`.
+- **Measurements:** the conclusion only, with its source (a file under `docs/`, a test).
+- **Each section ends with, in this order** (leave out what doesn't apply):
+  - `Measured`: one line per run, "date, conditions, result", key numbers only, before → after.
+  - `Tests added: N`: one line per area, "area N: what it guards against". Don't list what each test checks. Existing tests that were adjusted along the way aren't mentioned unless what they guard changed.
+  - `Docs`: which documents and which sections.
+  - `Total` (every section has it, last): N .rs files changed (M new), +X / −Y lines; data and config files (by name, or "none"); dependencies unchanged, or what was added or removed; tests from A to B (the pass count of `cargo test --workspace`). "No code changed" when none was.

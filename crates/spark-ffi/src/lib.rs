@@ -130,7 +130,9 @@ pub enum SessionError {
     #[error("refused")]
     Refused,
     /// Push was not turned on: the text passed back was not the current warning.
-    #[error("push was not turned on: show the current warning and pass back exactly what was shown")]
+    #[error(
+        "push was not turned on: show the current warning and pass back exactly what was shown"
+    )]
     WarningNotShown,
 }
 

@@ -64,6 +64,7 @@ fn deployment() -> Config {
         tor: "off".into(),
         cover_seconds: 0,
         proxy: "127.0.0.1:9050".into(),
+        push_consent: String::new(),
     }
 }
 

@@ -55,8 +55,8 @@ export ASMFLAGS="$CFLAGS"
 # Only on Linux. macOS cannot simply drop it: dyld refuses to *execute* a Mach-O
 # with no LC_UUID, so a build script linked this way fails to run and the build
 # never finishes. There the identifier is normalised out of the comparison instead
-# (see verify-reproducible.sh), which is a weaker claim honestly stated rather than
-# a stronger one quietly assumed. CI builds in a pinned Linux container, so the
+# (see repro-manifest.sh), which is a weaker claim honestly stated rather than
+# a stronger one quietly assumed. CI builds in a Linux container, so the
 # artifacts anyone would actually check are covered by the unqualified version.
 if [ "$(uname -s)" != "Darwin" ]; then
   export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,--build-id=none"

@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install 1.94.1 --profile minimal -c rustfmt -c clippy
+      - run: rustup toolchain install stable --profile minimal -c rustfmt -c clippy
       - run: rustc --version
       - run: cargo test -p spark-invariants -- --nocapture
       - run: cargo fmt --all --check
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup toolchain install stable --profile minimal
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses advisories
@@ -30,11 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup toolchain install stable --profile minimal
       - run: scripts/verify-reproducible.sh
 
   cross-machine:
-    # Two different machines, one pinned environment.
+    # Two different machines, one environment.
     #
     # The previous version of this job compared ubuntu-latest against
     # ubuntu-22.04 and failed, correctly. Reproducibility says the same *inputs*
@@ -43,24 +43,21 @@ jobs:
     # links against all three, so the bytes differ for a reason that is not a bug.
     # The old job was asserting something reproducible builds never promised.
     #
-    # Pinning a container fixes the real problem instead of lowering the bar. The
-    # environment is now identical by construction, `replica` gives two distinct
-    # runner VMs, and the image is the one a third party would use to check a
-    # release for themselves — which is the entire point of D4.
+    # One container image fixes the real problem instead of lowering the bar. The
+    # environment is identical by construction, and `replica` gives two distinct
+    # runner VMs. The tag names the distro but not the compiler: both replicas
+    # build with the stable rustc it carries when the run starts, and a third
+    # party checking a release needs that same rustc.
     needs: reproducible
     strategy:
       matrix:
         replica: [a, b]
     runs-on: ubuntu-latest
-    container: rust:1.94.1-slim-bookworm
+    container: rust:slim-bookworm
     steps:
       - uses: actions/checkout@v4
       - run: scripts/build-repro.sh /tmp/out
-      - run: |
-          cd /tmp/out/release
-          find . -maxdepth 2 -type f \( -perm -u+x -o -name '*.rlib' \) \
-            ! -name '*.dylib' ! -name '*.so' ! -name '*.dll' \
-            | LC_ALL=C sort | xargs sha256sum | tee "$GITHUB_WORKSPACE/manifest-${{ matrix.replica }}.txt"
+      - run: scripts/repro-manifest.sh /tmp/out | tee "manifest-${{ matrix.replica }}.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: manifest-${{ matrix.replica }}

@@ -462,14 +462,14 @@ impl Room {
         let mut next = self.owners()?;
         for p in self.group.pending_proposals() {
             self.validate_proposal(p)?;
-            if let Proposal::Remove(r) = p.proposal() {
-                if let Some(m) = self.group.members().find(|m| m.index == r.removed()) {
-                    let key = VerifyingKey::from_bytes(
-                        &m.signature_key.try_into().map_err(|_| RoomError::Mls)?,
-                    )
-                    .map_err(|_| RoomError::Mls)?;
-                    next = next.without(&key);
-                }
+            if let Proposal::Remove(r) = p.proposal()
+                && let Some(m) = self.group.members().find(|m| m.index == r.removed())
+            {
+                let key = VerifyingKey::from_bytes(
+                    &m.signature_key.try_into().map_err(|_| RoomError::Mls)?,
+                )
+                .map_err(|_| RoomError::Mls)?;
+                next = next.without(&key);
             }
         }
         if next.is_empty() {

@@ -84,10 +84,7 @@ impl OwnerSet {
         if !b.len().is_multiple_of(32) {
             return Err(OwnerSetError::Malformed);
         }
-        let mut v: Vec<[u8; 32]> = b
-            .chunks_exact(32)
-            .map(|c| c.try_into().expect("chunk is 32 bytes"))
-            .collect();
+        let mut v: Vec<[u8; 32]> = b.as_chunks::<32>().0.to_vec();
         if v.iter().any(|b| VerifyingKey::from_bytes(b).is_err())
             || v.windows(2).any(|w| w[0] >= w[1])
         {

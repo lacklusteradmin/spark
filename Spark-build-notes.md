@@ -42,7 +42,7 @@ Write an automated check that fails if any other field is persisted. Run it in C
 - **Storage:** two S3-compatible stores — keyrings by `hash(pubkey)`, and an account-free content store.
 - **Transport:** WebSocket over TLS; Tor via SOCKS5, selectable per traffic class.
 - **Blind signatures:** RFC 9474 blind RSA or an audited privacy-pass library. One primitive serves storage tokens and payment vouchers.
-- **Reproducible builds from commit 1.** Pin compiler and dependency versions; remove timestamps, file ordering, embedded paths.
+- **Reproducible builds from commit 1.** Pin dependency versions; remove timestamps, file ordering, embedded paths. The compiler follows stable, so a rebuild needs the rustc that built the binary.
 
 ## 4. Traps
 

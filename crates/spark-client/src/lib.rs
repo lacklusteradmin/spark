@@ -109,8 +109,13 @@ pub struct Client<S: Services> {
     /// roots in the keyring are, because those unlock everything, but the messages
     /// on screen are the thing the user asked to see.
     history: BTreeMap<RoomId, Vec<Entry>>,
-    scans: BTreeMap<(RoomId, u64, [u8; 16]), (u64, u64, u64)>,
+    scans: BTreeMap<ScanKey, ScanCursor>,
 }
+
+/// One lane of one epoch of a room: room, epoch, lane id.
+type ScanKey = (RoomId, u64, [u8; 16]);
+/// Where a lane's scan stands: next slot, backfill slot, end of the current sweep.
+type ScanCursor = (u64, u64, u64);
 
 impl<S: Services> Client<S> {
     /// Open an account from its recovery phrase.
@@ -1019,7 +1024,7 @@ impl<S: Services> Client<S> {
             name.as_bytes(),
             &upload.receipt.0,
             size_class,
-            &blinded,
+            blinded,
         )?;
         let token = pk
             .finalize(pending.blinding.restore(), &sig, &message)
