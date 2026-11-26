@@ -109,7 +109,9 @@ impl Deployment {
     /// A short interval, not F12's minute: this runs a whole session, and the
     /// claim under test is that pacing carries real traffic correctly, not how
     /// long a slot is. `crates/spark-cli/tests/cover_traffic.rs` is what checks
-    /// what the pacing actually hides.
+    /// what the pacing actually hides. Not shorter than 5 ms either: each paced
+    /// connection now sends at every boundary, idle or not, and a millisecond
+    /// clock on three connections per client is mostly load on the test machine.
     fn connect_paced(&self) -> std::io::Result<Remote> {
         Remote::connect_via(
             &self.keyring,
@@ -117,7 +119,7 @@ impl Deployment {
             &self.issuer,
             &[self.pin],
             spark_transport::Mode::AlwaysOff,
-            Cover::Every(std::time::Duration::from_millis(1)),
+            Cover::Every(std::time::Duration::from_millis(5)),
             ("127.0.0.1".into(), 0),
         )
     }
@@ -593,6 +595,40 @@ fn a_room_message_and_a_photo_go_on_different_connections() {
         text, text_after_message,
         "a photo also touched the text connection"
     );
+}
+
+#[test]
+fn an_idle_paced_client_keeps_the_schedule() {
+    // `docs/SPARK-SPEC.md` F12: the client transmits whether or not it has anything
+    // to say. A paced connection that sent only while a request waited would tell
+    // an observer exactly when there was something to say, one interval late — which
+    // is what the real client did until each paced connection got a clock of its own.
+    let d = deployment();
+    let mut rng = Fixed(9);
+    let mut alice = Client::from_mnemonic(
+        &Mnemonic::from_entropy(&[13; 32]),
+        d.connect_paced().expect("alice"),
+    )
+    .expect("alice");
+    let room = alice.create_room(&mut rng, "quiet").expect("room");
+
+    // Three paced connections (keyring, room text, issuer) on 5 ms clocks: half a
+    // second of quiet is a hundred boundaries apiece.
+    let before = alice.services().cover_slots();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let quiet = alice.services().cover_slots() - before;
+    assert!(
+        quiet >= 60,
+        "{quiet} slots in half a second of quiet: the idle client fell silent"
+    );
+    assert!(
+        quiet <= 3 * 102,
+        "{quiet} slots in half a second: more than one per boundary"
+    );
+
+    alice
+        .send(&mut rng, room, b"after the quiet")
+        .expect("send");
 }
 
 #[test]

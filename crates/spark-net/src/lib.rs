@@ -42,8 +42,8 @@ pub use session::{
 use spark_client::{Auth, ContentService, IssuerService, KeyringService, ServiceError, Services};
 use spark_crypto::{Token, TokenClaim};
 use spark_transport::{
-    Channel, ChannelError, Class, Mode, Paced, Pin, RealTicker, TcpConnector, Transport,
-    TransportError,
+    Availability, Channel, ChannelError, Class, Mode, Pin, Platform, Scheduled, TcpConnector,
+    Transport, TransportError,
 };
 use spark_wire::{content, issuer, keyring};
 use std::net::TcpStream;
@@ -61,7 +61,8 @@ type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
 ///
 /// `docs/SPARK-SPEC.md` F12's cover traffic, as a decision rather than a default — for
 /// the same reason `mode` is one. It costs real latency: a request waits for the
-/// next slot, which is a minute away. A client that turned that on without being
+/// next slot, up to a minute away, and its reply for the slot after. A client that
+/// turned that on without being
 /// asked would be a client that felt broken, and a client that could never turn it
 /// on would be one where F12 is a paragraph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,8 +71,14 @@ pub enum Cover {
     Off,
     /// Transmit one uniform frame per slot, dummy or not.
     ///
+    /// Each paced connection keeps a clock of its own and sends a frame at every
+    /// boundary, carrying whatever requests are queued or nothing
+    /// ([`spark_transport::Scheduled`]). Refused, before anything is sent, on a
+    /// platform that cannot keep the stream running in the background
+    /// ([`spark_transport::Platform::availability`]).
+    ///
     /// The interval is carried rather than fixed so the paced path can be tested
-    /// against a real deployment: at F12's minute, one exchange takes a minute, so
+    /// against a real deployment: at F12's minute, one exchange takes up to two, so
     /// a test of it would never be written and the path would go unexercised —
     /// which is how `Transport` came to be dead code the first time. Use
     /// [`Cover::DEFAULT`] anywhere a person is waiting; a shorter interval narrows
@@ -88,22 +95,19 @@ impl Cover {
 
 /// A connection's framing, which is what pacing changes.
 enum Framing {
-    /// Boxed only to keep the two variants a similar size; a `Channel` is over a
-    /// kilobyte and `Paced` is a pointer, and this enum lives behind a mutex
-    /// anyway.
-    Plain(Box<Channel<Tls>>),
-    /// One uniform frame per slot. The ticker is the real 60-second one; the tests
-    /// that check the *shape* of this use `Immediate` against a `Paced` they build
-    /// themselves, because a test that waited out real slots would take an hour.
-    Paced(Box<Paced<Tls, RealTicker>>),
+    /// One protocol frame out, one back, one call at a time. The mutex is what
+    /// makes `&self` enough for the [`Services`] traits: a request and its response
+    /// are one exchange on one connection, so they cannot interleave. Boxed only to
+    /// keep the two variants a similar size; a `Channel` is over a kilobyte.
+    Plain(Box<Mutex<Channel<Tls>>>),
+    /// One uniform frame per slot, sent by the connection's own thread at every
+    /// boundary of its clock; calls queue for the next slot.
+    Scheduled(Scheduled),
 }
 
-/// One connection, used one call at a time.
-///
-/// The mutex is what makes `&self` enough for the [`Services`] traits. A request
-/// and its response are one exchange on one connection, so they cannot interleave.
+/// One connection.
 struct Conn {
-    framing: Mutex<Framing>,
+    framing: Framing,
     /// The class this connection carries, fixed when it was opened.
     ///
     /// Held rather than passed per call: the class decided the route, so letting a
@@ -127,6 +131,22 @@ impl Conn {
         cover: Cover,
     ) -> std::io::Result<Self> {
         let (host, port) = split(addr)?;
+        // Media is never paced, whatever was asked for. A one-minute cadence over a
+        // photo is not a slower photo, and `Hysteria::enqueue` refuses the class
+        // outright — so a paced connection here could not carry what it was opened
+        // to carry. For the rest, the platform is asked before anything connects.
+        let schedule = match cover {
+            Cover::Every(interval) if class != Class::Media => {
+                let schedule = spark_transport::hysteria::enable(Platform::current()).map_err(
+                    |a| match a {
+                        Availability::Unavailable { reason } => std::io::Error::other(reason),
+                        Availability::Full => std::io::Error::other("cover traffic unavailable"),
+                    },
+                )?;
+                Some((schedule, interval))
+            }
+            _ => None,
+        };
         // Through the routing layer, which decides direct or Tor from the class
         // and, if Tor, negotiates SOCKS5 on a circuit of its own. TLS wraps the
         // result: doing it before would mean handshaking with the proxy.
@@ -146,18 +166,14 @@ impl Conn {
         let url = format!("wss://{addr}/");
         let ch = Channel::connect(stream, &url)
             .map_err(|_| std::io::Error::other("handshake failed"))?;
-        // Media is never paced, whatever was asked for. A one-minute cadence over a
-        // photo is not a slower photo, and `Hysteria::enqueue` refuses the class
-        // outright — so a `Paced` here would be a connection that cannot carry what
-        // it was opened to carry.
-        let framing = match cover {
-            Cover::Every(i) if class != Class::Media => {
-                Framing::Paced(Box::new(Paced::new(ch, RealTicker::every(i))))
+        let framing = match schedule {
+            Some((schedule, interval)) => {
+                Framing::Scheduled(Scheduled::start(ch, schedule, interval)?)
             }
-            _ => Framing::Plain(Box::new(ch)),
+            None => Framing::Plain(Box::new(Mutex::new(ch))),
         };
         Ok(Self {
-            framing: Mutex::new(framing),
+            framing,
             class,
             calls: AtomicU64::new(0),
         })
@@ -169,10 +185,13 @@ impl Conn {
         R: serde::de::DeserializeOwned + spark_wire::Operation,
     {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        let mut framing = self.framing.lock().map_err(|_| ServiceError::Unreachable)?;
-        match &mut *framing {
-            Framing::Plain(c) => c.call(req).map_err(io),
-            Framing::Paced(p) => p.call(self.class, req).map_err(io),
+        match &self.framing {
+            Framing::Plain(c) => c
+                .lock()
+                .map_err(|_| ServiceError::Unreachable)?
+                .call(req)
+                .map_err(io),
+            Framing::Scheduled(s) => s.call(self.class, req).map_err(io),
         }
     }
 
@@ -183,9 +202,9 @@ impl Conn {
 
     /// Slots this connection has transmitted on. Zero if it is not paced.
     fn slots(&self) -> u64 {
-        match &*self.framing.lock().expect("framing") {
+        match &self.framing {
             Framing::Plain(_) => 0,
-            Framing::Paced(p) => p.slots(),
+            Framing::Scheduled(s) => s.slots(),
         }
     }
 }
@@ -223,8 +242,8 @@ impl Remote {
     /// it is gone: the entire point of routing through `Transport` is that how much
     /// goes over Tor is a decision, and an API that makes it for you silently is
     /// how it stopped being one the first time. `cover` is spelled out for the same
-    /// reason, and costs more when wrong: it trades a minute of latency per request
-    /// for hiding when the client had something to say.
+    /// reason, and costs more when wrong: it trades up to two minutes of latency per
+    /// request for hiding when the client had something to say.
     pub fn connect_via(
         keyring: &str,
         content: &str,

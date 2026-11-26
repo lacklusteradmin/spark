@@ -308,6 +308,7 @@ struct Faults<'a> {
     uploaded: RefCell<Vec<[u8; 32]>>,
     hidden: RefCell<Vec<[u8; 32]>>,
     substituted: RefCell<Option<Vec<u8>>>,
+    gets: Cell<usize>,
 }
 impl<'a> Faults<'a> {
     fn new(local: &'a Local) -> Self {
@@ -318,6 +319,7 @@ impl<'a> Faults<'a> {
             uploaded: RefCell::new(vec![]),
             hidden: RefCell::new(vec![]),
             substituted: RefCell::new(None),
+            gets: Cell::new(0),
         }
     }
 }
@@ -349,6 +351,7 @@ impl ContentService for Faults<'_> {
         Ok(receipt)
     }
     fn get(&self, class: Class, name: &[u8; 32]) -> Result<Option<Vec<u8>>, ServiceError> {
+        self.gets.set(self.gets.get() + 1);
         if let Some(bytes) = self.substituted.borrow().as_ref() {
             return Ok(Some(bytes.clone()));
         }
@@ -466,7 +469,8 @@ fn long_gaps_and_temporarily_hidden_older_messages_are_eventually_revisited() {
         a.send(&mut rng, room, &[i]).unwrap();
     }
     *f.hidden.borrow_mut() = f.uploaded.borrow()[..3].to_vec();
-    assert!(a.sync(room, 2).unwrap().is_empty());
+    // Three missing slots against a `probe_ahead` of two: the gap walk finds the
+    // far side in the same call.
     assert_eq!(a.sync(room, 2).unwrap().len(), 3);
     f.hidden.borrow_mut().clear();
     for _ in 0..6 {
@@ -479,6 +483,104 @@ fn long_gaps_and_temporarily_hidden_older_messages_are_eventually_revisited() {
             .map(|m| m.body[0])
             .collect::<Vec<_>>(),
         (0..6).collect::<Vec<u8>>()
+    );
+}
+
+/// Two accounts in a room, both reaching the content service through `f`.
+fn pair<'a>(
+    f: &'a Faults<'a>,
+    rng: &mut Fixed,
+) -> (
+    Client<&'a Faults<'a>>,
+    Client<&'a Faults<'a>>,
+    spark_keyring::RoomId,
+) {
+    let mut a = Client::from_mnemonic(&phrase(1), f).unwrap();
+    let mut b = Client::from_mnemonic(&phrase(2), f).unwrap();
+    let room = a.create_room(rng, "polling").unwrap();
+    let kp = b.key_package().unwrap();
+    let inv = a.invite(rng, room, &kp).unwrap();
+    b.accept(rng, &inv, "polling").unwrap();
+    (a, b, room)
+}
+
+#[test]
+fn a_client_that_has_polled_a_quiet_room_for_long_still_sees_the_next_message_at_once() {
+    // `spark chat` syncs every two seconds. A scan cursor that kept walking into
+    // the empty slots past the newest message left every later message behind it,
+    // for a sweep whose round grew with the time spent polling: after an hour and
+    // a half of quiet, each new message took over a minute to appear.
+    let s = deployment();
+    let f = Faults::new(&s);
+    let mut rng = Fixed(105);
+    let (mut a, mut b, room) = pair(&f, &mut rng);
+
+    let idle_cost = |b: &mut Client<&Faults>| {
+        let before = f.gets.get();
+        b.sync(room, 3).unwrap();
+        f.gets.get() - before
+    };
+    for _ in 0..10 {
+        b.sync(room, 3).unwrap();
+    }
+    let early = idle_cost(&mut b);
+    for _ in 0..300 {
+        b.sync(room, 3).unwrap();
+    }
+    assert_eq!(
+        idle_cost(&mut b),
+        early,
+        "a quiet sync costs more the longer the client has been polling"
+    );
+
+    for i in 0..3u8 {
+        a.sync(room, 3).unwrap();
+        a.send(&mut rng, room, &[i]).unwrap();
+        assert_eq!(
+            b.sync(room, 3).unwrap().len(),
+            usize::from(i) + 1,
+            "message {i} did not appear on the next sync"
+        );
+    }
+}
+
+#[test]
+fn a_gap_that_opens_while_a_client_polls_is_crossed_within_the_walk_window() {
+    // Four missing slots against a `probe_ahead` of three, opening after the
+    // reader has polled for a while: the walk past the frontier has to come back
+    // round to them rather than be somewhere far ahead.
+    let s = deployment();
+    let f = Faults::new(&s);
+    let mut rng = Fixed(106);
+    let (mut a, mut b, room) = pair(&f, &mut rng);
+    for _ in 0..300 {
+        b.sync(room, 3).unwrap();
+    }
+
+    let start = f.uploaded.borrow().len();
+    for i in 0..5u8 {
+        a.sync(room, 3).unwrap();
+        a.send(&mut rng, room, &[i]).unwrap();
+    }
+    *f.hidden.borrow_mut() = f.uploaded.borrow()[start..start + 4].to_vec();
+
+    // At most 256 / 3 calls for the walk to come round to the far side.
+    assert!(
+        (0..86).any(|_| b.sync(room, 3).unwrap().len() == 1),
+        "the entry past the gap was not found within the walk window"
+    );
+
+    f.hidden.borrow_mut().clear();
+    let all = (0..4).find_map(|_| {
+        let got = b.sync(room, 3).unwrap();
+        (got.len() == 5).then_some(got)
+    });
+    assert_eq!(
+        all.expect("the withheld entries were not revisited")
+            .iter()
+            .map(|m| m.body[0])
+            .collect::<Vec<_>>(),
+        (0..5).collect::<Vec<u8>>()
     );
 }
 

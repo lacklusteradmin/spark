@@ -45,7 +45,8 @@ pub struct Config {
     pub pins: Vec<String>,
     /// `"off"`, `"text"` for D2's default, or `"on"` for everything over Tor.
     pub tor: String,
-    /// Seconds between transmissions, or 0 for no cover traffic.
+    /// Seconds between transmissions, or 0 for no cover traffic. `BadConfig` on
+    /// iOS, which cannot keep the stream running in the background.
     pub cover_seconds: u64,
     /// `host:port` of the SOCKS5 proxy, used only when `tor` is not `"off"`.
     pub proxy: String,

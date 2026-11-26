@@ -19,7 +19,10 @@ mod serve;
 use spark_crypto::{IssuerKey, Secret};
 use spark_store::Db;
 use spark_transport::hysteria::FRAME_BYTES;
-use spark_transport::{Channel, Class, Immediate, Paced};
+use spark_transport::{
+    Channel, Class, Frame as CoverFrame, Hysteria, Immediate, Paced, Platform, Reassembler,
+    Scheduled,
+};
 use spark_wire::keyring;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -117,6 +120,20 @@ struct Deployment {
 }
 
 fn deployment() -> Deployment {
+    let (keyring, tls, pin) = keyring_and_identity();
+    let k = serve::keyring_service("127.0.0.1:0", tls, keyring).unwrap();
+    Deployment {
+        addr: k.addr.to_string(),
+        pin,
+    }
+}
+
+/// A keyring service, and a TLS identity to serve it under.
+fn keyring_and_identity() -> (
+    Arc<spark_keyring_server::Keyring>,
+    Arc<rustls::ServerConfig>,
+    spark_transport::Pin,
+) {
     let keyring = Arc::new(spark_keyring_server::Keyring::new(
         Db::new(),
         Secret::new([0x5e; 32]),
@@ -124,14 +141,9 @@ fn deployment() -> Deployment {
     ));
     keyring.set_minute(1);
     let id = certs::generate("spark.local").expect("server identity");
-    let pin = id.pin;
     let key = rustls_pki_types::PrivateKeyDer::try_from(id.key).expect("key");
     let tls = Arc::new(spark_transport::tls::server_config(id.cert, key).expect("tls"));
-    let k = serve::keyring_service("127.0.0.1:0", tls, keyring).unwrap();
-    Deployment {
-        addr: k.addr.to_string(),
-        pin,
-    }
+    (keyring, tls, id.pin)
 }
 
 /// A paced connection, plus the byte sizes crossing its socket.
@@ -143,6 +155,12 @@ fn deployment() -> Deployment {
 type Tls = rustls::StreamOwned<rustls::ClientConnection, Observed>;
 
 fn connect(d: &Deployment) -> (Paced<Tls, Immediate>, Wire) {
+    let (ch, wire) = open(d);
+    (Paced::new(ch, Immediate), wire)
+}
+
+/// The connection under [`connect`], before any pacing is put on it.
+fn open(d: &Deployment) -> (Channel<Tls>, Wire) {
     let wire: Wire = Default::default();
     let tcp = std::net::TcpStream::connect(&d.addr).unwrap();
     // So that a server which answers a dummy with silence fails the test instead of
@@ -159,7 +177,7 @@ fn connect(d: &Deployment) -> (Paced<Tls, Immediate>, Wire) {
     let conn = rustls::ClientConnection::new(tls, name).unwrap();
     let ch = Channel::connect(rustls::StreamOwned::new(conn, stream), "ws://spark.local/").unwrap();
     wire.lock().unwrap().clear();
-    (Paced::new(ch, Immediate), wire)
+    (ch, wire)
 }
 
 #[test]
@@ -251,6 +269,109 @@ fn an_idle_connection_and_a_busy_one_look_the_same() {
         replies(&i),
         "the replies gave away which connection was busy"
     );
+}
+
+#[test]
+fn a_scheduled_connection_sends_the_same_frames_idle_or_busy() {
+    // The test above turns the idle connection's slots by hand. This is the claim
+    // on the schedule itself: two connections started on the same clock, one
+    // carrying five requests and one carrying none, put the same number of
+    // same-sized frames on the wire in the same time, in both directions.
+    let d = deployment();
+    let interval = std::time::Duration::from_millis(50);
+    let (busy_ch, busy_wire) = open(&d);
+    let (idle_ch, idle_wire) = open(&d);
+    let schedule = || spark_transport::hysteria::enable(Platform::Desktop).unwrap();
+    let started = std::time::Instant::now();
+    let busy = Scheduled::start(busy_ch, schedule(), interval).unwrap();
+    let _idle = Scheduled::start(idle_ch, schedule(), interval).unwrap();
+
+    for _ in 0..5 {
+        let r: keyring::Resp = busy
+            .call(Class::Control, &keyring::Req::Challenge { addr: [3; 32] })
+            .unwrap();
+        assert!(matches!(r, keyring::Resp::Challenge(_)));
+    }
+    // Run on past the requests, then read both wires at one moment.
+    std::thread::sleep((interval * 16).saturating_sub(started.elapsed()));
+    let (b, i) = (
+        busy_wire.lock().unwrap().clone(),
+        idle_wire.lock().unwrap().clone(),
+    );
+
+    let (out_b, out_i) = (sends(&b), sends(&i));
+    assert!(
+        out_i.len() >= 10,
+        "the idle connection sent {} frames in sixteen slots",
+        out_i.len()
+    );
+    assert!(
+        out_b.len().abs_diff(out_i.len()) <= 1,
+        "the busy connection sent {} frames and the idle one {}",
+        out_b.len(),
+        out_i.len()
+    );
+    assert!(
+        out_b.iter().chain(&out_i).all(|&n| n == out_b[0]),
+        "frame sizes varied: {out_b:?} {out_i:?}"
+    );
+    // The last frame's answer may still be on its way, so it is left out.
+    let back: Vec<usize> = [replies(&b), replies(&i)]
+        .into_iter()
+        .flat_map(|r| r[..r.len() - 1].to_vec())
+        .collect();
+    assert!(
+        back.iter().all(|&n| n == back[0]),
+        "the replies gave away which connection was busy: {back:?}"
+    );
+}
+
+#[test]
+fn a_frame_carrying_a_request_is_answered_as_soon_as_a_dummy() {
+    // `docs/threats.toml` W4. A server that handled a request before answering the
+    // frame that carried it would answer a dummy at once and a request only after
+    // the handling, and the gap between a frame and its answer would say which
+    // frames carried something. Handling takes a quarter of a second here: the
+    // answer must not wait for it, and the reply comes in the answer after.
+    let handling = std::time::Duration::from_millis(250);
+    let (keyring, tls, pin) = keyring_and_identity();
+    let k = serve::serve("127.0.0.1:0", tls, move |r: keyring::Req| {
+        std::thread::sleep(handling);
+        keyring.handle_wire(r)
+    })
+    .unwrap();
+    let d = Deployment {
+        addr: k.addr.to_string(),
+        pin,
+    };
+    let (mut ch, _) = open(&d);
+    let mut out = Hysteria::new();
+    let mut inbound = Reassembler::new();
+    let mut exchange = |out: &mut Hysteria| {
+        let started = std::time::Instant::now();
+        ch.send_raw(out.tick().as_bytes()).unwrap();
+        let back = CoverFrame::from_bytes(&ch.recv_raw().unwrap()).unwrap();
+        (started.elapsed(), inbound.accept(&back).unwrap())
+    };
+
+    let request = spark_wire::Frame::encode(7, &keyring::Req::Challenge { addr: [5; 32] })
+        .unwrap()
+        .to_bytes();
+    out.enqueue(Class::Control, &request).unwrap();
+    let (waited, got) = exchange(&mut out);
+    assert!(
+        waited < handling / 2,
+        "the frame carrying a request was answered after {waited:?}, once it was handled"
+    );
+    assert!(got.is_empty());
+
+    let (_, got) = exchange(&mut out);
+    let reply = spark_wire::Frame::from_bytes(&got[0]).unwrap();
+    assert_eq!(reply.req_id, 7);
+    assert!(matches!(
+        reply.body::<keyring::Resp>().unwrap(),
+        keyring::Resp::Challenge(_)
+    ));
 }
 
 #[test]

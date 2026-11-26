@@ -87,8 +87,8 @@ fn usage() {
                    --cover paces every transmission onto a fixed schedule, so an\n\
                    observer cannot tell when there was something to say. It is off\n\
                    by default because it is slow, and slow is the point: at the\n\
-                   spec's 60s a demo of a dozen requests takes a quarter of an\n\
-                   hour. Give a shorter interval to watch it work.\n",
+                   spec's 60s a demo of a dozen requests takes twenty minutes.\n\
+                   Give a shorter interval to watch it work.\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -293,7 +293,7 @@ fn build_services_in(
 fn cmd_remote_demo(args: &[String]) -> i32 {
     // `--cover` with no number means F12's interval, because the default has to be
     // the real one. A number after it is for watching the mechanism without waiting
-    // out a quarter of an hour — it is a demo knob, not a deployment one: a shorter
+    // out twenty minutes — it is a demo knob, not a deployment one: a shorter
     // interval narrows the window an observer has to average over.
     let cover = match args.iter().position(|a| a == "--cover") {
         None => spark_net::Cover::Off,

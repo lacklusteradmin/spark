@@ -81,7 +81,7 @@ impl Listener {
 }
 
 /// Serve one service on `bind`, dispatching each request through `f`.
-fn serve<Q, R, F>(bind: &str, tls: Arc<ServerConfig>, f: F) -> std::io::Result<Listener>
+pub(crate) fn serve<Q, R, F>(bind: &str, tls: Arc<ServerConfig>, f: F) -> std::io::Result<Listener>
 where
     Q: serde::de::DeserializeOwned + spark_wire::Operation + Send + 'static,
     R: serde::Serialize + spark_wire::Operation + Send + 'static,
@@ -168,6 +168,13 @@ where
 /// land on the client's schedule. What it must do is keep them the same *size*: a
 /// 4 KB request answered by an 8 KB reply tells an observer a real request went
 /// out, and the client's cadence bought nothing.
+///
+/// And the same *delay*. Each frame is answered at once with what is already
+/// queued, and the requests it completed are handled after that, their replies
+/// going out in the answer to the next frame. Handling first would make a frame
+/// that carried a request wait for it while a dummy did not, and the gap between a
+/// frame and its answer would say which was which. The cost is one slot: a reply
+/// comes back a frame later than it could.
 fn paced_session<S, Q, R, F>(
     mut ch: Channel<S>,
     first: CoverFrame,
@@ -184,6 +191,13 @@ where
     let mut outbound = Hysteria::new();
     let mut cover = first;
     loop {
+        // One frame back per frame received, carrying whatever is queued — a reply,
+        // part of one, or nothing. Answering a dummy with silence would make dummies
+        // recognisable, which is the whole thing being defended against; answering
+        // after handling would make the requests recognisable by the wait.
+        deadline.restart();
+        ch.send_raw(outbound.tick().as_bytes())?;
+
         let msgs = inbound
             .accept(&cover)
             .map_err(|_| ChannelError::Wire(spark_wire::WireError::Malformed))?;
@@ -195,11 +209,6 @@ where
                 .enqueue(Class::Text, &reply)
                 .map_err(|_| ChannelError::Wire(spark_wire::WireError::Encode))?;
         }
-        // One frame back per frame received, carrying whatever is queued — a reply,
-        // part of one, or nothing. Answering a dummy with silence would make dummies
-        // recognisable, which is the whole thing being defended against.
-        deadline.restart();
-        ch.send_raw(outbound.tick().as_bytes())?;
 
         deadline.restart();
         cover = match ch.recv_raw() {

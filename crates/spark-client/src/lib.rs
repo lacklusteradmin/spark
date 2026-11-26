@@ -114,8 +114,19 @@ pub struct Client<S: Services> {
 
 /// One lane of one epoch of a room: room, epoch, lane id.
 type ScanKey = (RoomId, u64, [u8; 16]);
-/// Where a lane's scan stands: next slot, backfill slot, end of the current sweep.
+/// Where a lane's scan stands: gap-walk slot, backfill slot, end of the current sweep.
 type ScanCursor = (u64, u64, u64);
+
+/// How far past a lane's newest held entry the gap walk looks before starting over.
+///
+/// A writer leaves a gap when it reserves a slot and never fills it, and a store
+/// can leave one by withholding entries. A walk that went on forever would reach
+/// the far side of any gap, but it would also leave the frontier behind: a message
+/// written after the walk passed its slot would wait for the sweep, longer the
+/// longer the client had been polling. Bounded, the walk crosses a gap of up to
+/// this many slots within `GAP_WINDOW / probe_ahead` calls; a longer run of missing
+/// slots hides the entries after it until the run is filled.
+const GAP_WINDOW: u64 = 256;
 
 impl<S: Services> Client<S> {
     /// Open an account from its recovery phrase.
@@ -751,8 +762,9 @@ impl<S: Services> Client<S> {
                 .collect()
         };
 
-        // Scan cursors are disposable, like plaintext history. Continue through long
-        // gaps on later calls, and revisit holes so temporary withholding is not final.
+        // Scan cursors are disposable, like plaintext history. Every call scans from
+        // the newest held entry, looks past it for the far side of a long gap, and
+        // revisits holes below it so temporary withholding is not final.
         let known: std::collections::BTreeSet<(u64, [u8; 16], u64)> = self
             .history
             .get(&id)
@@ -763,12 +775,37 @@ impl<S: Services> Client<S> {
         let mut fetched = Vec::new();
         for (epoch, root, lanes) in room_gens {
             for lane in lanes {
-                let scan_key = (id, epoch, *lane.as_bytes());
-                let (start, mut backfill, mut sweep_end) =
+                let lane_id = *lane.as_bytes();
+                let scan_key = (id, epoch, lane_id);
+                let (mut walk, mut backfill, mut sweep_end) =
                     self.scans.get(&scan_key).copied().unwrap_or((0, 0, 0));
-                let mut next = start;
+                // The frontier: one past the newest entry held in this lane. The
+                // forward scan starts here on every call, so a message written since
+                // the last call is the first slot asked for, however long the client
+                // has been polling a quiet room.
+                let mut top = known
+                    .range((epoch, lane_id, 0)..=(epoch, lane_id, u64::MAX))
+                    .next_back()
+                    .map_or(0, |&(_, _, seq)| seq.saturating_add(1));
+                let probe = probe_ahead.clamp(1, 256);
+                let mut next = top;
                 let mut misses = 0;
+                let mut walked = false;
                 for _ in 0..256 {
+                    if misses >= probe {
+                        // The frontier looks empty, but so would a gap longer than
+                        // `probe`. Look past it once per call, resuming where the last
+                        // look stopped and starting over once it is `GAP_WINDOW` past
+                        // the frontier.
+                        if walked {
+                            break;
+                        }
+                        walked = true;
+                        if walk > next && walk < top.saturating_add(GAP_WINDOW) {
+                            next = walk;
+                        }
+                        misses = 0;
+                    }
                     let slot = Slot::new(lane, next);
                     let Some(after) = next.checked_add(1) else {
                         break;
@@ -777,6 +814,7 @@ impl<S: Services> Client<S> {
                     match self.fetch_entry(id, epoch, &root, slot) {
                         Ok(Some(e)) => {
                             misses = 0;
+                            top = next;
                             if !known.contains(&(epoch, e.lane, e.seq)) {
                                 fetched.push(e);
                             }
@@ -784,20 +822,19 @@ impl<S: Services> Client<S> {
                         Ok(None) | Err(ClientError::Corrupt) => misses += 1,
                         Err(e) => return Err(e),
                     }
-                    if misses >= probe_ahead.clamp(1, 256) {
-                        break;
-                    }
                 }
-                // A separate rotating budget repairs earlier temporary holes.
+                walk = next;
+                // A separate rotating budget repairs earlier temporary holes, below
+                // the frontier: above it, the forward scan and the walk look.
                 for _ in 0..256 {
                     if backfill >= sweep_end {
                         backfill = 0;
-                        sweep_end = next;
+                        sweep_end = top;
                         break;
                     }
                     let slot = Slot::new(lane, backfill);
                     backfill += 1;
-                    if known.contains(&(epoch, *lane.as_bytes(), slot.seq)) {
+                    if known.contains(&(epoch, lane_id, slot.seq)) {
                         continue;
                     }
                     match self.fetch_entry(id, epoch, &root, slot) {
@@ -806,7 +843,7 @@ impl<S: Services> Client<S> {
                         Err(e) => return Err(e),
                     }
                 }
-                self.scans.insert(scan_key, (next, backfill, sweep_end));
+                self.scans.insert(scan_key, (walk, backfill, sweep_end));
             }
         }
 

@@ -26,7 +26,7 @@ use spark_client::{Client, ClientError, Invitation};
 use spark_crypto::blind::{TryCryptoRng, TryRng};
 use spark_keyring::RoomId;
 use spark_transport::push::{self, Consent, Setting};
-use spark_transport::{Mode, Pin};
+use spark_transport::{Mode, Pin, Platform};
 
 /// The warning an interface must show before push can be turned on.
 ///
@@ -148,7 +148,8 @@ pub struct Config {
     pub pins: Vec<String>,
     /// `"off"`, `"text"` for D2's default, or `"on"` for everything over Tor.
     pub tor: String,
-    /// Seconds between transmissions, or 0 for no cover traffic.
+    /// Seconds between transmissions, or 0 for no cover traffic. `BadConfig` on a
+    /// platform that cannot keep the stream running (`Cover::Every`).
     pub cover_seconds: u64,
     /// `host:port` of the SOCKS5 proxy, used only when `tor` is not `"off"`.
     pub proxy: String,
@@ -286,6 +287,10 @@ impl Session {
         };
         let cover = match cfg.cover_seconds {
             0 => Cover::Off,
+            // A platform that cannot keep the stream running is asked for something
+            // it cannot do, which is a configuration error rather than a network
+            // one.
+            _ if !Platform::current().may_enable() => return Err(SessionError::BadConfig),
             s => Cover::Every(std::time::Duration::from_secs(s)),
         };
         let pins: Vec<Pin> = cfg

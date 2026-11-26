@@ -2,7 +2,8 @@
 //!
 //! The client transmits on a fixed schedule whether or not the user is doing
 //! anything. Real messages occupy slots in place of dummies, so traffic looks the
-//! same whether the user is chatting constantly or asleep.
+//! same whether the user is chatting constantly or asleep. This module is the
+//! schedule; [`crate::paced::Scheduled`] keeps it on a live connection.
 //!
 //! This is the only mechanism that meaningfully attacks traffic-analysis
 //! correlation (W4), and it pairs with Tor: Tor hides *where* you are, this hides
@@ -299,6 +300,18 @@ pub enum Availability {
 }
 
 impl Platform {
+    /// The platform this build targets. Anything that is neither iOS nor Android
+    /// is treated as desktop.
+    pub const fn current() -> Self {
+        if cfg!(target_os = "ios") {
+            Platform::Ios
+        } else if cfg!(target_os = "android") {
+            Platform::Android
+        } else {
+            Platform::Desktop
+        }
+    }
+
     /// Whether this platform can hold the stream open while backgrounded.
     ///
     /// # This is a claim, and it has not been verified here
@@ -340,9 +353,11 @@ impl Platform {
 
 /// Turn cover traffic on for a platform, or find out why not.
 ///
-/// The only constructor for a running schedule. A `Hysteria` obtained any other
-/// way does not exist, so "shipped as a setting that silently does less than it
-/// claims" is not a thing the API can express.
+/// How the client gets the schedule a [`crate::paced::Scheduled`] connection runs
+/// on, so that a platform that cannot sustain the stream is refused before
+/// anything is sent rather than "shipped as a setting that silently does less than
+/// it claims". [`Hysteria::new`] stays public for the server's reply queue and for
+/// tests of the scheduler itself.
 pub fn enable(platform: Platform) -> Result<Hysteria, Availability> {
     match platform.availability() {
         Availability::Full => Ok(Hysteria::new()),

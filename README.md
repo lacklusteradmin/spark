@@ -194,7 +194,9 @@ domains one in every way that matters.
 **Gate 11** — idle and 100-message captures are indistinguishable in count, size
 and timing; the stream survives backgrounding, or the platform is documented as
 unable to support it. Both hold, in
-`crates/spark-transport/tests/hysteria.rs`. The capture is taken from *sealed*
+`crates/spark-transport/tests/hysteria.rs` for the scheduler and in
+`crates/spark-cli/tests/cover_traffic.rs` for a scheduled connection on a real
+socket. The capture is taken from *sealed*
 frames, because the observable is ciphertext — a test comparing plaintext would
 prove indistinguishability of something an observer never sees.
 
@@ -203,9 +205,9 @@ prove indistinguishability of something an observer never sees.
 assumptions most likely to fail and says to verify it during the mobile spike.
 **That spike has not been run.** Until it is, iOS is treated as unable, because
 guessing the other way leaves a user believing their timing is covered when it is
-not. `enable()` is the only way to obtain a running schedule and it refuses on
-iOS, so "a setting that silently does less than it claims" is not something the
-API can express.
+not. `enable()` refuses on iOS, and the client takes every paced connection's
+schedule from it, so `Remote` refuses `Cover::Every` there and the FFI answers a
+nonzero `cover_seconds` with `BadConfig`.
 
 **Gate 12** — every W1–W7 threat has an implemented mitigation or a documented
 accepted risk. `docs/threats.toml` is that reckoning and
@@ -333,16 +335,27 @@ people enable makes those people a recognisable group. A test pins the daily cos
 at roughly 5.6 MB, so shrinking the interval for latency has to be a decision
 rather than a side effect.
 
-The schedule is wired into the real client, not only into the scheduler: `Remote`
-takes a `Cover` the same way it takes a `Mode`, and `spark remote-demo --cover`
-runs the whole conversation on it. Two things follow from having done this on a
-live connection rather than in a harness:
+The schedule is kept by the real client, not only by the scheduler: `Remote`
+takes a `Cover` the same way it takes a `Mode`, and each paced connection gets a
+thread of its own that sends one frame at every boundary of a clock started when
+the connection opened, carrying whatever requests are queued or nothing
+(`spark_transport::Scheduled`). A request waits for the next boundary. A boundary
+missed because a slot's answer was slow is skipped rather than sent late, so the
+schedule keeps its phase instead of bursting to catch up.
+`crates/spark-cli/tests/cover_traffic.rs` checks that a scheduled connection
+carrying requests and one carrying none put the same frames on the wire in the
+same time, and `crates/spark-cli/tests/network.rs` that an idle client keeps
+sending; `spark remote-demo --cover` runs the whole conversation on it. Two things
+follow from having done this on a live connection rather than in a harness:
 
 The **server** answers one uniform frame for every frame it receives, including
 dummies. Silence in reply to a dummy would make dummies recognisable, which is the
 client's whole cadence undone from the other end — a connection is paced or not,
 decided by whether its first message is exactly one cover frame, so a peer cannot
-switch mid-session.
+switch mid-session. It answers each frame *before* handling what the frame
+carried, and the replies go out in the answer to the next frame: handling first
+would make a frame that carried a request wait while a dummy did not, and the
+time to an answer would give the request away.
 
 Only the **first** transmission is special: the TLS handshake and the WebSocket
 upgrade are not padded and do not need to be, because they happen once per
@@ -351,7 +364,8 @@ that prefix deliberately and says so, rather than filtering by size — a size
 filter would also hide a short frame, which is the failure the test is for.
 
 It is **off by default**, and that is a real cost rather than a formality: at F12's
-minute, every request waits up to a minute. `Remote::cover_slots()` exists so the
+minute, every request waits up to two minutes, one for the next slot and one for
+the answer that carries its reply. `Remote::cover_slots()` exists so the
 setting can be checked from outside — without it, a `Cover` that was accepted and
 then dropped on the floor passes every test, since a paced session and an unpaced
 one deliver the same messages.
